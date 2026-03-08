@@ -1,0 +1,373 @@
+import os
+import re
+import uuid
+import zipfile
+import tempfile
+import threading
+import time
+
+import fitz  # PyMuPDF
+from flask import Flask, request, jsonify, send_file, render_template_string
+
+app = Flask(__name__)
+
+# Temp session store: session_id -> {"dir": path, "images": [...], "zip": path}
+SESSIONS: dict = {}
+SESSION_TTL = 600  # seconds – clean up after 10 minutes
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def parse_page_range(page_range_str: str, total_pages: int) -> list:
+    s = page_range_str.strip().lower()
+    if s == "" or s == "all":
+        return list(range(total_pages))
+    indices = set()
+    for part in s.split(","):
+        part = part.strip()
+        if "-" in part:
+            m = re.fullmatch(r"(\d+)\s*-\s*(\d+)", part)
+            if not m:
+                raise ValueError(f"Invalid range: '{part}'")
+            start, end = int(m.group(1)), int(m.group(2))
+            if start < 1 or end > total_pages or start > end:
+                raise ValueError(
+                    f"Range '{part}' out of bounds (doc has {total_pages} pages)"
+                )
+            indices.update(range(start - 1, end))
+        else:
+            if not part.isdigit():
+                raise ValueError(f"Invalid page: '{part}'")
+            n = int(part)
+            if n < 1 or n > total_pages:
+                raise ValueError(
+                    f"Page {n} out of bounds (doc has {total_pages} pages)"
+                )
+            indices.add(n - 1)
+    return sorted(indices)
+
+
+def cleanup_old_sessions():
+    while True:
+        time.sleep(60)
+        now = time.time()
+        expired = [sid for sid, meta in list(SESSIONS.items())
+                   if now - meta.get("created", now) > SESSION_TTL]
+        for sid in expired:
+            meta = SESSIONS.pop(sid, {})
+            d = meta.get("dir")
+            if d and os.path.isdir(d):
+                import shutil
+                shutil.rmtree(d, ignore_errors=True)
+
+
+threading.Thread(target=cleanup_old_sessions, daemon=True).start()
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.route("/")
+def index():
+    return render_template_string(HTML)
+
+
+@app.route("/convert", methods=["POST"])
+def convert():
+    pdf_file = request.files.get("pdf")
+    fmt = request.form.get("format", "PNG").upper()
+    dpi = int(request.form.get("dpi", 150))
+    page_range_str = request.form.get("pages", "all")
+
+    if not pdf_file or pdf_file.filename == "":
+        return jsonify({"error": "No PDF file provided."}), 400
+    if fmt not in ("PNG", "JPEG"):
+        return jsonify({"error": "Format must be PNG or JPEG."}), 400
+    if dpi not in (72, 150, 300):
+        return jsonify({"error": "DPI must be 72, 150, or 300."}), 400
+
+    session_id = uuid.uuid4().hex
+    tmp_dir = tempfile.mkdtemp(prefix=f"pdf2img_{session_id}_")
+
+    try:
+        pdf_path = os.path.join(tmp_dir, "input.pdf")
+        pdf_file.save(pdf_path)
+
+        doc = fitz.open(pdf_path)
+        total = len(doc)
+
+        pages = parse_page_range(page_range_str, total)
+        if not pages:
+            return jsonify({"error": "No pages selected."}), 400
+
+        scale = dpi / 72.0
+        mat = fitz.Matrix(scale, scale)
+        ext = "jpg" if fmt == "JPEG" else "png"
+        image_names = []
+
+        for idx in pages:
+            page = doc[idx]
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            name = f"page_{idx + 1:04d}.{ext}"
+            img_path = os.path.join(tmp_dir, name)
+            if fmt == "JPEG":
+                pix.save(img_path, jpg_quality=92)
+            else:
+                pix.save(img_path)
+            image_names.append(name)
+
+        doc.close()
+
+        zip_name = "converted_images.zip"
+        zip_path = os.path.join(tmp_dir, zip_name)
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for name in image_names:
+                zf.write(os.path.join(tmp_dir, name), arcname=name)
+
+        SESSIONS[session_id] = {
+            "dir": tmp_dir,
+            "images": image_names,
+            "zip": zip_name,
+            "created": time.time(),
+        }
+
+        return jsonify({
+            "session": session_id,
+            "count": len(pages),
+            "images": [f"/file/{session_id}/{n}" for n in image_names],
+            "zip": f"/file/{session_id}/{zip_name}",
+        })
+
+    except ValueError as e:
+        import shutil; shutil.rmtree(tmp_dir, ignore_errors=True)
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        import shutil; shutil.rmtree(tmp_dir, ignore_errors=True)
+        return jsonify({"error": f"Conversion failed: {e}"}), 500
+
+
+@app.route("/file/<session_id>/<filename>")
+def serve_file(session_id, filename):
+    meta = SESSIONS.get(session_id)
+    if not meta:
+        return "Session not found or expired.", 404
+    path = os.path.join(meta["dir"], filename)
+    if not os.path.isfile(path):
+        return "File not found.", 404
+    as_attachment = filename.endswith(".zip")
+    return send_file(path, as_attachment=as_attachment,
+                     download_name=filename if as_attachment else None)
+
+
+# ── HTML template ──────────────────────────────────────────────────────────────
+
+HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PDF to Image Converter</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #f4f6f9; color: #1a1a2e; min-height: 100vh; }
+  header { background: #2b2d42; color: #fff; padding: 1.2rem 2rem; }
+  header h1 { font-size: 1.4rem; font-weight: 600; }
+  header p { font-size: 0.85rem; opacity: 0.7; margin-top: 0.25rem; }
+  main { max-width: 1100px; margin: 2rem auto; padding: 0 1rem; display: grid; grid-template-columns: 320px 1fr; gap: 1.5rem; }
+  .panel { background: #fff; border-radius: 10px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,.07); }
+  .panel h2 { font-size: 1rem; font-weight: 600; margin-bottom: 1.2rem; }
+  label { display: block; font-size: 0.82rem; font-weight: 500; margin-bottom: 0.3rem; color: #444; }
+  .field { margin-bottom: 1rem; }
+  input[type=text], select {
+    width: 100%; padding: .5rem .7rem; border: 1px solid #ddd; border-radius: 6px;
+    font-size: 0.9rem; outline: none; transition: border .15s;
+  }
+  input[type=text]:focus, select:focus { border-color: #4f8ef7; }
+  .radio-group { display: flex; gap: .6rem; }
+  .radio-group label {
+    flex: 1; text-align: center; padding: .45rem; border: 1px solid #ddd;
+    border-radius: 6px; cursor: pointer; font-size: 0.85rem; font-weight: 500;
+    transition: all .15s; color: #444;
+  }
+  .radio-group input { display: none; }
+  .radio-group input:checked + label { background: #2b2d42; color: #fff; border-color: #2b2d42; }
+  .drop-zone {
+    border: 2px dashed #bbb; border-radius: 8px; padding: 2rem 1rem;
+    text-align: center; cursor: pointer; transition: border .15s; margin-bottom: 1rem;
+  }
+  .drop-zone.dragover { border-color: #4f8ef7; background: #f0f5ff; }
+  .drop-zone input { display: none; }
+  .drop-zone p { font-size: 0.85rem; color: #888; margin-top: 0.5rem; }
+  .drop-zone .filename { font-size: 0.85rem; color: #2b2d42; font-weight: 600; margin-top: .5rem; }
+  .btn {
+    display: block; width: 100%; padding: .65rem; background: #2b2d42; color: #fff;
+    border: none; border-radius: 6px; font-size: 0.95rem; font-weight: 600;
+    cursor: pointer; transition: background .15s; margin-top: 0.5rem;
+  }
+  .btn:hover { background: #3a3d56; }
+  .btn:disabled { background: #aaa; cursor: not-allowed; }
+  #status { font-size: 0.85rem; margin-top: .8rem; min-height: 1.2rem; color: #555; }
+  #status.error { color: #c0392b; }
+  #status.ok { color: #27ae60; }
+  .download-btn {
+    display: none; width: 100%; padding: .55rem; background: #27ae60; color: #fff;
+    border: none; border-radius: 6px; font-size: 0.88rem; font-weight: 600;
+    cursor: pointer; text-align: center; margin-top: .8rem; text-decoration: none;
+  }
+  .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: .8rem; }
+  .gallery img { width: 100%; border-radius: 6px; border: 1px solid #e0e0e0; object-fit: contain; background: #fafafa; cursor: pointer; transition: box-shadow .15s; }
+  .gallery img:hover { box-shadow: 0 4px 14px rgba(0,0,0,.15); }
+  .empty { color: #aaa; font-size: 0.9rem; text-align: center; padding: 3rem 0; }
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #fff; border-top-color: transparent; border-radius: 50%; animation: spin .6s linear infinite; vertical-align: middle; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #lightbox { display:none; position:fixed; inset:0; background:rgba(0,0,0,.8); z-index:100; align-items:center; justify-content:center; }
+  #lightbox.open { display:flex; }
+  #lightbox img { max-width:90vw; max-height:90vh; border-radius:8px; }
+  #lightbox-close { position:fixed; top:1rem; right:1.2rem; color:#fff; font-size:2rem; cursor:pointer; line-height:1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>PDF to Image Converter</h1>
+  <p>Convert any PDF page to high-quality PNG or JPEG images</p>
+</header>
+<main>
+  <div class="panel">
+    <h2>Settings</h2>
+
+    <div class="field">
+      <div class="drop-zone" id="dropZone">
+        <input type="file" id="pdfInput" accept=".pdf">
+        <svg width="36" height="36" fill="none" stroke="#bbb" stroke-width="1.5" viewBox="0 0 24 24"><path d="M12 16V4m0 0L8 8m4-4 4 4"/><rect x="3" y="16" width="18" height="5" rx="1.5"/></svg>
+        <p>Click or drag a PDF here</p>
+        <div class="filename" id="fileName"></div>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Output Format</label>
+      <div class="radio-group">
+        <input type="radio" name="fmt" id="fmtPNG" value="PNG" checked>
+        <label for="fmtPNG">PNG</label>
+        <input type="radio" name="fmt" id="fmtJPEG" value="JPEG">
+        <label for="fmtJPEG">JPEG</label>
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="dpi">Resolution</label>
+      <select id="dpi">
+        <option value="72">72 DPI – Screen</option>
+        <option value="150" selected>150 DPI – Standard</option>
+        <option value="300">300 DPI – Print quality</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label for="pages">Page Range</label>
+      <input type="text" id="pages" value="all" placeholder='all, 1-3, 1,4,6, 2-5,8'>
+    </div>
+
+    <button class="btn" id="convertBtn" onclick="convert()">Convert</button>
+    <div id="status"></div>
+    <a id="downloadBtn" class="download-btn" download>Download all as ZIP</a>
+  </div>
+
+  <div class="panel">
+    <h2>Preview</h2>
+    <div id="gallery" class="empty">Converted images will appear here.</div>
+  </div>
+</main>
+
+<div id="lightbox" onclick="closeLightbox()">
+  <span id="lightbox-close">&times;</span>
+  <img id="lightboxImg" src="" alt="">
+</div>
+
+<script>
+const dropZone = document.getElementById("dropZone");
+const pdfInput = document.getElementById("pdfInput");
+const fileName = document.getElementById("fileName");
+
+dropZone.addEventListener("click", () => pdfInput.click());
+pdfInput.addEventListener("change", () => {
+  if (pdfInput.files[0]) fileName.textContent = pdfInput.files[0].name;
+});
+dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("dragover"); });
+dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
+dropZone.addEventListener("drop", e => {
+  e.preventDefault(); dropZone.classList.remove("dragover");
+  const f = e.dataTransfer.files[0];
+  if (f && f.type === "application/pdf") {
+    const dt = new DataTransfer(); dt.items.add(f);
+    pdfInput.files = dt.files;
+    fileName.textContent = f.name;
+  }
+});
+
+async function convert() {
+  const file = pdfInput.files[0];
+  if (!file) { setStatus("Please select a PDF file.", "error"); return; }
+
+  const fmt   = document.querySelector('input[name=fmt]:checked').value;
+  const dpi   = document.getElementById("dpi").value;
+  const pages = document.getElementById("pages").value;
+  const btn   = document.getElementById("convertBtn");
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Converting…';
+  setStatus("Uploading and converting…", "");
+
+  const form = new FormData();
+  form.append("pdf", file);
+  form.append("format", fmt);
+  form.append("dpi", dpi);
+  form.append("pages", pages);
+
+  try {
+    const res  = await fetch("/convert", { method: "POST", body: form });
+    const data = await res.json();
+    if (!res.ok) { setStatus(data.error || "Conversion failed.", "error"); return; }
+
+    setStatus(`Converted ${data.count} page(s) to ${fmt} at ${dpi} DPI.`, "ok");
+    renderGallery(data.images);
+    const dl = document.getElementById("downloadBtn");
+    dl.href = data.zip; dl.style.display = "block";
+  } catch (e) {
+    setStatus("Network error: " + e.message, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Convert";
+  }
+}
+
+function renderGallery(images) {
+  const g = document.getElementById("gallery");
+  if (!images.length) { g.innerHTML = '<p class="empty">No images.</p>'; return; }
+  g.className = "gallery";
+  g.innerHTML = images.map(src =>
+    `<img src="${src}" loading="lazy" alt="" onclick="openLightbox('${src}')">`
+  ).join("");
+}
+
+function setStatus(msg, cls) {
+  const el = document.getElementById("status");
+  el.textContent = msg; el.className = cls;
+}
+
+function openLightbox(src) {
+  document.getElementById("lightboxImg").src = src;
+  document.getElementById("lightbox").classList.add("open");
+}
+function closeLightbox() {
+  document.getElementById("lightbox").classList.remove("open");
+}
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeLightbox(); });
+</script>
+</body>
+</html>
+"""
+
+if __name__ == "__main__":
+    print("Starting PDF to Image Converter...")
+    print("Open http://127.0.0.1:5000 in your browser")
+    app.run(host="127.0.0.1", port=5000, debug=False)
