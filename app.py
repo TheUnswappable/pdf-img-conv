@@ -11,11 +11,91 @@ import fitz  # PyMuPDF
 from PIL import Image
 from flask import Flask, request, jsonify, send_file, render_template_string
 from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure
+from pymongo.errors import ConnectionFailure, PyMongoError
 
 app = Flask(__name__)
 
-# ── MongoDB Atlas ─────────────────────────────────────────────────────────────
+
+def ensure_mongo_schema(database):
+    validator = {
+        "$jsonSchema": {
+            "bsonType": "object",
+            "required": ["type", "session_id", "created_at"],
+            "properties": {
+                "type": {
+                    "enum": ["pdf_to_image", "image_to_pdf"],
+                },
+                "session_id": {
+                    "bsonType": "string",
+                    "minLength": 8,
+                },
+                "created_at": {
+                    "bsonType": "date",
+                },
+                "format": {
+                    "enum": ["PNG", "JPEG"],
+                },
+                "dpi": {
+                    "enum": [72, 150, 300],
+                },
+                "pages_converted": {
+                    "bsonType": ["int", "long", "double"],
+                },
+                "total_pages": {
+                    "bsonType": ["int", "long", "double"],
+                },
+                "page_size": {
+                    "enum": ["A4", "LETTER", "A3"],
+                },
+                "orientation": {
+                    "enum": ["portrait", "landscape"],
+                },
+                "image_count": {
+                    "bsonType": ["int", "long", "double"],
+                },
+            },
+            "oneOf": [
+                {
+                    "properties": {"type": {"enum": ["pdf_to_image"]}},
+                    "required": ["format", "dpi", "pages_converted", "total_pages"],
+                },
+                {
+                    "properties": {"type": {"enum": ["image_to_pdf"]}},
+                    "required": ["page_size", "orientation", "image_count"],
+                },
+            ],
+        }
+    }
+
+    if "conversions" in database.list_collection_names():
+        database.command(
+            {
+                "collMod": "conversions",
+                "validator": validator,
+                "validationLevel": "strict",
+                "validationAction": "error",
+            }
+        )
+    else:
+        database.create_collection(
+            "conversions",
+            validator=validator,
+            validationLevel="strict",
+            validationAction="error",
+        )
+
+
+def ensure_mongo_indexes(database):
+    conversions = database.conversions
+    conversions.create_index("session_id", unique=True, name="uniq_session_id")
+    conversions.create_index([("created_at", -1)], name="created_at_desc")
+    conversions.create_index(
+        [("type", 1), ("created_at", -1)],
+        name="type_created_at_desc",
+    )
+
+
+# MongoDB Atlas
 MONGO_URI = os.environ.get("MONGO_URI") or os.environ.get("MONGODB_URI", "")
 db = None
 
@@ -24,19 +104,24 @@ if MONGO_URI:
         mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         mongo_client.admin.command("ping")
         db = mongo_client.get_default_database("pdf_img_converter")
+        ensure_mongo_schema(db)
+        ensure_mongo_indexes(db)
         print("Connected to MongoDB Atlas successfully.")
     except ConnectionFailure as e:
         print(f"MongoDB connection failed: {e}")
         db = None
+    except PyMongoError as e:
+        print(f"MongoDB setup failed: {e}")
+        db = None
 else:
-    print("MONGODB_URI not set – running without database.")
+    print("MONGODB_URI not set - running without database.")
 
 # Temp session store: session_id -> {"dir": path, "images": [...], "zip": path}
 SESSIONS: dict = {}
-SESSION_TTL = 600  # seconds – clean up after 10 minutes
+SESSION_TTL = 600  # seconds - clean up after 10 minutes
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# Helpers
 
 def parse_page_range(page_range_str: str, total_pages: int) -> list:
     s = page_range_str.strip().lower()
@@ -71,20 +156,24 @@ def cleanup_old_sessions():
     while True:
         time.sleep(60)
         now = time.time()
-        expired = [sid for sid, meta in list(SESSIONS.items())
-                   if now - meta.get("created", now) > SESSION_TTL]
+        expired = [
+            sid
+            for sid, meta in list(SESSIONS.items())
+            if now - meta.get("created", now) > SESSION_TTL
+        ]
         for sid in expired:
             meta = SESSIONS.pop(sid, {})
             d = meta.get("dir")
             if d and os.path.isdir(d):
                 import shutil
+
                 shutil.rmtree(d, ignore_errors=True)
 
 
 threading.Thread(target=cleanup_old_sessions, daemon=True).start()
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+# Routes
 
 @app.route("/")
 def index():
@@ -151,32 +240,49 @@ def convert():
         }
 
         if db is not None:
-            db.conversions.insert_one({
-                "type": "pdf_to_image",
-                "session_id": session_id,
-                "format": fmt,
-                "dpi": dpi,
-                "pages_converted": len(pages),
-                "total_pages": total,
-                "created_at": datetime.now(timezone.utc),
-            })
+            db.conversions.insert_one(
+                {
+                    "type": "pdf_to_image",
+                    "session_id": session_id,
+                    "format": fmt,
+                    "dpi": dpi,
+                    "pages_converted": len(pages),
+                    "total_pages": total,
+                    "created_at": datetime.now(timezone.utc),
+                }
+            )
 
-        return jsonify({
-            "session": session_id,
-            "count": len(pages),
-            "images": [f"/file/{session_id}/{n}" for n in image_names],
-            "zip": f"/file/{session_id}/{zip_name}",
-        })
+        return jsonify(
+            {
+                "session": session_id,
+                "count": len(pages),
+                "images": [f"/file/{session_id}/{n}" for n in image_names],
+                "zip": f"/file/{session_id}/{zip_name}",
+            }
+        )
 
     except ValueError as e:
-        import shutil; shutil.rmtree(tmp_dir, ignore_errors=True)
+        import shutil
+
+        shutil.rmtree(tmp_dir, ignore_errors=True)
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        import shutil; shutil.rmtree(tmp_dir, ignore_errors=True)
+        import shutil
+
+        shutil.rmtree(tmp_dir, ignore_errors=True)
         return jsonify({"error": f"Conversion failed: {e}"}), 500
 
 
-ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".gif", ".webp"}
+ALLOWED_IMAGE_EXTENSIONS = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".bmp",
+    ".tiff",
+    ".tif",
+    ".gif",
+    ".webp",
+}
 
 
 @app.route("/img2pdf", methods=["POST"])
@@ -230,7 +336,14 @@ def img_to_pdf():
         if len(doc) == 0:
             return jsonify({"error": "No valid image files found."}), 400
 
-        first_name = next((f.filename for f in files if os.path.splitext(f.filename)[1].lower() in ALLOWED_IMAGE_EXTENSIONS), "images")
+        first_name = next(
+            (
+                f.filename
+                for f in files
+                if os.path.splitext(f.filename)[1].lower() in ALLOWED_IMAGE_EXTENSIONS
+            ),
+            "images",
+        )
         base = os.path.splitext(os.path.basename(first_name))[0]
         pdf_name = f"converted-{base}.pdf"
         pdf_path = os.path.join(tmp_dir, pdf_name)
@@ -244,23 +357,29 @@ def img_to_pdf():
         }
 
         if db is not None:
-            db.conversions.insert_one({
-                "type": "image_to_pdf",
-                "session_id": session_id,
-                "page_size": page_size,
-                "orientation": orientation,
-                "image_count": len(files),
-                "created_at": datetime.now(timezone.utc),
-            })
+            db.conversions.insert_one(
+                {
+                    "type": "image_to_pdf",
+                    "session_id": session_id,
+                    "page_size": page_size,
+                    "orientation": orientation,
+                    "image_count": len(files),
+                    "created_at": datetime.now(timezone.utc),
+                }
+            )
 
-        return jsonify({
-            "session": session_id,
-            "pages": len(files),
-            "pdf": f"/file/{session_id}/{pdf_name}",
-        })
+        return jsonify(
+            {
+                "session": session_id,
+                "pages": len(files),
+                "pdf": f"/file/{session_id}/{pdf_name}",
+            }
+        )
 
     except Exception as e:
-        import shutil; shutil.rmtree(tmp_dir, ignore_errors=True)
+        import shutil
+
+        shutil.rmtree(tmp_dir, ignore_errors=True)
         return jsonify({"error": f"Conversion failed: {e}"}), 500
 
 
@@ -274,11 +393,12 @@ def serve_file(session_id, filename):
     if not os.path.isfile(path):
         return "File not found.", 404
     as_attachment = safe_name.endswith(".zip") or safe_name.endswith(".pdf")
-    return send_file(path, as_attachment=as_attachment,
-                     download_name=safe_name if as_attachment else None)
+    return send_file(
+        path,
+        as_attachment=as_attachment,
+        download_name=safe_name if as_attachment else None,
+    )
 
-
-# ── HTML template ──────────────────────────────────────────────────────────────
 
 HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -369,7 +489,6 @@ HTML = """<!DOCTYPE html>
   <button class="tab-btn" onclick="switchTab('img2pdf')">Image &rarr; PDF</button>
 </div>
 
-<!-- ─── PDF to Image ─────────────────────────────── -->
 <main id="tab-pdf2img" class="tab-content active">
   <div class="panel">
     <h2>Settings</h2>
@@ -396,9 +515,9 @@ HTML = """<!DOCTYPE html>
     <div class="field">
       <label for="dpi">Resolution</label>
       <select id="dpi">
-        <option value="72">72 DPI – Screen</option>
-        <option value="150" selected>150 DPI – Standard</option>
-        <option value="300">300 DPI – Print quality</option>
+        <option value="72">72 DPI - Screen</option>
+        <option value="150" selected>150 DPI - Standard</option>
+        <option value="300">300 DPI - Print quality</option>
       </select>
     </div>
 
@@ -418,7 +537,6 @@ HTML = """<!DOCTYPE html>
   </div>
 </main>
 
-<!-- ─── Image to PDF ─────────────────────────────── -->
 <main id="tab-img2pdf" class="tab-content">
   <div class="panel">
     <h2>Settings</h2>
@@ -469,7 +587,6 @@ HTML = """<!DOCTYPE html>
 </div>
 
 <script>
-/* ─── Tab switching ─── */
 function switchTab(tab) {
   document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
@@ -477,7 +594,6 @@ function switchTab(tab) {
   event.target.classList.add('active');
 }
 
-/* ─── PDF → Image ─── */
 const dropZone = document.getElementById("dropZone");
 const pdfInput = document.getElementById("pdfInput");
 const fileName = document.getElementById("fileName");
@@ -502,14 +618,14 @@ async function convertPdf2Img() {
   const file = pdfInput.files[0];
   if (!file) { setStatus("status", "Please select a PDF file.", "error"); return; }
 
-  const fmt   = document.querySelector('input[name=fmt]:checked').value;
-  const dpi   = document.getElementById("dpi").value;
+  const fmt = document.querySelector('input[name=fmt]:checked').value;
+  const dpi = document.getElementById("dpi").value;
   const pages = document.getElementById("pages").value;
-  const btn   = document.getElementById("convertBtn");
+  const btn = document.getElementById("convertBtn");
 
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span>Converting…';
-  setStatus("status", "Uploading and converting…", "");
+  btn.innerHTML = '<span class="spinner"></span>Converting...';
+  setStatus("status", "Uploading and converting...", "");
 
   const form = new FormData();
   form.append("pdf", file);
@@ -518,7 +634,7 @@ async function convertPdf2Img() {
   form.append("pages", pages);
 
   try {
-    const res  = await fetch("/convert", { method: "POST", body: form });
+    const res = await fetch("/convert", { method: "POST", body: form });
     const data = await res.json();
     if (!res.ok) { setStatus("status", data.error || "Conversion failed.", "error"); return; }
 
@@ -543,10 +659,9 @@ function renderGallery(images) {
   ).join("");
 }
 
-/* ─── Image → PDF ─── */
 const imgDropZone = document.getElementById("imgDropZone");
-const imgInput    = document.getElementById("imgInput");
-let imgFiles      = [];  // maintain ordered file list
+const imgInput = document.getElementById("imgInput");
+let imgFiles = [];
 
 imgDropZone.addEventListener("click", () => imgInput.click());
 imgInput.addEventListener("change", () => addImages(imgInput.files));
@@ -597,13 +712,13 @@ function renderImgPreview() {
 async function convertImg2Pdf() {
   if (!imgFiles.length) { setStatus("img2pdfStatus", "Please add at least one image.", "error"); return; }
 
-  const pageSize    = document.getElementById("pageSize").value;
+  const pageSize = document.getElementById("pageSize").value;
   const orientation = document.querySelector('input[name=orient]:checked').value;
-  const btn         = document.getElementById("img2pdfBtn");
+  const btn = document.getElementById("img2pdfBtn");
 
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span>Converting…';
-  setStatus("img2pdfStatus", "Uploading and converting…", "");
+  btn.innerHTML = '<span class="spinner"></span>Converting...';
+  setStatus("img2pdfStatus", "Uploading and converting...", "");
 
   const form = new FormData();
   imgFiles.forEach(f => form.append("images", f));
@@ -611,7 +726,7 @@ async function convertImg2Pdf() {
   form.append("orientation", orientation);
 
   try {
-    const res  = await fetch("/img2pdf", { method: "POST", body: form });
+    const res = await fetch("/img2pdf", { method: "POST", body: form });
     const data = await res.json();
     if (!res.ok) { setStatus("img2pdfStatus", data.error || "Conversion failed.", "error"); return; }
 
@@ -626,7 +741,6 @@ async function convertImg2Pdf() {
   }
 }
 
-/* ─── Shared helpers ─── */
 function setStatus(id, msg, cls) {
   const el = document.getElementById(id);
   el.textContent = msg; el.className = "status " + cls;
@@ -636,9 +750,11 @@ function openLightbox(src) {
   document.getElementById("lightboxImg").src = src;
   document.getElementById("lightbox").classList.add("open");
 }
+
 function closeLightbox() {
   document.getElementById("lightbox").classList.remove("open");
 }
+
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeLightbox(); });
 </script>
 </body>
