@@ -14,7 +14,20 @@ from flask import Flask, request, jsonify, send_file, render_template_string
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, PyMongoError
 
+try:
+  from dotenv import load_dotenv
+except Exception:
+  load_dotenv = None
+
+try:
+  import razorpay
+except Exception:
+  razorpay = None
+
 app = Flask(__name__)
+
+if load_dotenv:
+  load_dotenv()
 
 
 def ensure_mongo_schema(database):
@@ -116,6 +129,25 @@ if MONGO_URI:
         db = None
 else:
     print("MONGODB_URI not set - running without database.")
+
+RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "").strip()
+RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "").strip()
+RAZORPAY_DONATION_AMOUNT_PAISA = int(
+  os.environ.get("RAZORPAY_DONATION_AMOUNT_PAISA", "9900")
+)
+RAZORPAY_DONATION_CURRENCY = os.environ.get("RAZORPAY_DONATION_CURRENCY", "INR").upper()
+RAZORPAY_DONATION_NAME = os.environ.get("RAZORPAY_DONATION_NAME", "Swift Convert")
+RAZORPAY_DONATION_DESCRIPTION = os.environ.get(
+  "RAZORPAY_DONATION_DESCRIPTION", "Support Swift Convert"
+)
+
+razorpay_client = None
+if RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET and razorpay:
+  razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
+elif RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET:
+  print("Razorpay keys are partially configured. Donation checkout will be disabled.")
+elif not razorpay:
+  print("razorpay package not available. Donation checkout will be disabled.")
 
 # Temp session store: session_id -> {"dir": path, "images": [...], "zip": path}
 SESSIONS: dict = {}
@@ -1154,6 +1186,49 @@ def download_file(session_id, filename):
     return send_file(path, as_attachment=True, download_name=safe_name)
 
 
+@app.route("/donate/order", methods=["POST"])
+def create_donation_order():
+    if not razorpay_client or not RAZORPAY_KEY_ID:
+        return jsonify({"error": "Razorpay is not configured on this server."}), 503
+
+    payload = request.get_json(silent=True) or {}
+    raw_amount = payload.get("amount")
+    amount = RAZORPAY_DONATION_AMOUNT_PAISA
+
+    if raw_amount is not None:
+        try:
+            amount = int(raw_amount)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid amount."}), 400
+
+    if amount < 100:
+        return jsonify({"error": "Minimum donation amount is 100 paise."}), 400
+
+    try:
+        order = razorpay_client.order.create(
+            {
+                "amount": amount,
+                "currency": RAZORPAY_DONATION_CURRENCY,
+                "receipt": f"don_{uuid.uuid4().hex[:18]}",
+                "payment_capture": 1,
+            }
+        )
+    except Exception as exc:
+        print(f"Failed to create Razorpay order: {exc}")
+        return jsonify({"error": "Unable to create payment order right now."}), 500
+
+    return jsonify(
+        {
+            "key": RAZORPAY_KEY_ID,
+            "order_id": order.get("id"),
+            "amount": order.get("amount"),
+            "currency": order.get("currency"),
+            "name": RAZORPAY_DONATION_NAME,
+            "description": RAZORPAY_DONATION_DESCRIPTION,
+        }
+    )
+
+
 HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1209,6 +1284,7 @@ HTML = """<!DOCTYPE html>
     font-family: "Poppins", sans-serif;
     color: var(--sw-ink);
     min-height: 100vh;
+    padding-bottom: 72px;
     transition: background .22s ease, color .22s ease;
     background:
       radial-gradient(circle at 85% -10%, rgba(255, 216, 189, .95) 0%, rgba(255, 216, 189, 0) 40%),
@@ -1249,6 +1325,21 @@ HTML = """<!DOCTYPE html>
     letter-spacing: .2px;
   }
 
+  .brand-title-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    line-height: 1;
+  }
+
+  .brand-powered {
+    font-size: .65rem;
+    font-weight: 500;
+    letter-spacing: .4px;
+    color: var(--sw-muted);
+    text-transform: lowercase;
+  }
+
   .brand-badge {
     width: 34px;
     height: 34px;
@@ -1274,6 +1365,106 @@ HTML = """<!DOCTYPE html>
     color: var(--sw-muted);
     font-size: .83rem;
     font-weight: 500;
+  }
+
+  .donate-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    display: flex;
+    justify-content: center;
+    padding: .6rem 1rem;
+    background: var(--sw-surface);
+    border-top: 1px solid var(--sw-line);
+    z-index: 999;
+  }
+
+  .donate-modal {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    background: rgba(0, 0, 0, .45);
+    z-index: 1200;
+  }
+
+  .donate-modal.open {
+    display: flex;
+  }
+
+  .donate-modal-card {
+    width: min(360px, 100%);
+    background: var(--sw-card);
+    border: 1px solid var(--sw-line);
+    border-radius: 16px;
+    padding: 1rem;
+    box-shadow: 0 18px 40px var(--sw-shadow);
+  }
+
+  .donate-modal-card h3 {
+    font-size: 1rem;
+    margin-bottom: .65rem;
+  }
+
+  .donate-modal-card p {
+    color: var(--sw-muted);
+    font-size: .82rem;
+    margin-bottom: .7rem;
+  }
+
+  .donate-amount {
+    width: 100%;
+    padding: .6rem .8rem;
+    border-radius: 10px;
+    border: 1px solid var(--sw-line);
+    background: var(--sw-card);
+    color: var(--sw-ink);
+    font-size: .95rem;
+    font-weight: 600;
+    outline: none;
+  }
+
+  .donate-amount:focus {
+    border-color: var(--sw-orange);
+    box-shadow: 0 0 0 3px rgba(252, 128, 25, .2);
+  }
+
+  .donate-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: .45rem;
+    padding: .45rem 1.1rem;
+    border-radius: 999px;
+    border: 1px solid var(--sw-line);
+    background: var(--sw-card);
+    color: var(--sw-text);
+    font-size: .8rem;
+    font-weight: 600;
+    cursor: pointer;
+    text-decoration: none;
+    transition: background .15s ease, transform .15s ease, box-shadow .15s ease;
+  }
+
+  .donate-btn:hover {
+    background: var(--sw-orange);
+    color: #fff;
+    border-color: transparent;
+    transform: translateY(-1px);
+    box-shadow: 0 6px 18px rgba(252,128,25,.35);
+  }
+
+  .donate-actions {
+    display: flex;
+    gap: .5rem;
+    margin-top: .75rem;
+  }
+
+  .donate-btn.alt {
+    background: transparent;
+    color: var(--sw-ink);
   }
 
   .topbar-actions {
@@ -1800,7 +1991,7 @@ HTML = """<!DOCTYPE html>
     <div class="topbar">
       <div class="brand">
         <button type="button" id="themeToggle" class="brand-badge" aria-label="Toggle theme" title="Toggle theme"><span id="themeIcon">☀</span></button>
-        <span>Swift Convert</span>
+        <span class="brand-title-wrap"><span>Swift Convert</span><span class="brand-powered">powered by vercel</span></span>
       </div>
       <div class="topbar-actions">
         <div class="top-note">Fast, clean, and one-click file delivery</div>
@@ -2043,6 +2234,7 @@ HTML = """<!DOCTYPE html>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script>
 <script>
 function switchTab(tab) {
   document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
@@ -2921,6 +3113,109 @@ document.getElementById("imgCompressDownload").addEventListener("click", (e) => 
   downloadFromEndpoint("imgCompressDownload", "imgCompressStatus");
 });
 
+document.addEventListener("DOMContentLoaded", () => {
+  const donateBtn = document.getElementById("donateBtn");
+  const donateModal = document.getElementById("donateModal");
+  const donateCancel = document.getElementById("donateCancel");
+  const donateConfirm = document.getElementById("donateConfirm");
+  const donateAmount = document.getElementById("donateAmount");
+  if (!donateBtn || !donateModal || !donateConfirm) return;
+
+  function openDonateModal() {
+    donateModal.classList.add("open");
+    if (donateAmount) donateAmount.focus();
+  }
+
+  function closeDonateModal() {
+    donateModal.classList.remove("open");
+  }
+
+  donateBtn.addEventListener("click", openDonateModal);
+  if (donateCancel) donateCancel.addEventListener("click", closeDonateModal);
+
+  donateModal.addEventListener("click", (event) => {
+    if (event.target === donateModal) closeDonateModal();
+  });
+
+  donateConfirm.addEventListener("click", async () => {
+    const rupees = donateAmount ? Number(donateAmount.value) : 0;
+    if (!Number.isFinite(rupees) || rupees <= 0) {
+      alert("Please enter a valid donation amount.");
+      if (donateAmount) donateAmount.focus();
+      return;
+    }
+
+    const amountPaise = Math.round(rupees * 100);
+    if (amountPaise < 100) {
+      alert("Minimum donation is Rs 1.");
+      if (donateAmount) donateAmount.focus();
+      return;
+    }
+
+    const originalText = donateConfirm.textContent;
+    donateConfirm.disabled = true;
+    donateConfirm.textContent = "Opening checkout...";
+
+    try {
+      const res = await fetch("/donate/order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ amount: amountPaise })
+      });
+      const payload = await res.json();
+
+      if (!res.ok) {
+        throw new Error(payload.error || "Could not start payment.");
+      }
+
+      if (typeof window.Razorpay !== "function") {
+        throw new Error("Razorpay Checkout failed to load.");
+      }
+
+      const options = {
+        key: payload.key,
+        amount: payload.amount,
+        currency: payload.currency,
+        name: payload.name,
+        description: payload.description,
+        order_id: payload.order_id,
+        handler: function () {
+          alert("Thank you for your support!");
+          donateConfirm.disabled = false;
+          donateConfirm.textContent = originalText;
+          closeDonateModal();
+        },
+        modal: {
+          ondismiss: function () {
+            donateConfirm.disabled = false;
+            donateConfirm.textContent = originalText;
+          }
+        },
+        theme: { color: "#FC8019" }
+      };
+
+      const razorpayCheckout = new Razorpay(options);
+      razorpayCheckout.on("payment.failed", function (response) {
+        const reason = response && response.error ? response.error.description : "Payment failed.";
+        alert(reason);
+        donateConfirm.disabled = false;
+        donateConfirm.textContent = originalText;
+      });
+      razorpayCheckout.open();
+    } catch (err) {
+      alert(err.message || "Unable to open checkout.");
+      donateConfirm.disabled = false;
+      donateConfirm.textContent = originalText;
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && donateModal.classList.contains("open")) {
+      closeDonateModal();
+    }
+  });
+});
+
 function openLightbox(src) {
   document.getElementById("lightboxImg").src = src;
   document.getElementById("lightbox").classList.add("open");
@@ -2932,6 +3227,20 @@ function closeLightbox() {
 
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeLightbox(); });
 </script>
+<div class="donate-bar">
+  <button type="button" id="donateBtn" class="donate-btn">Donate</button>
+</div>
+<div id="donateModal" class="donate-modal" role="dialog" aria-modal="true" aria-labelledby="donateTitle">
+  <div class="donate-modal-card">
+    <h3 id="donateTitle">Support Swift Convert</h3>
+    <p>Enter any donation amount in rupees.</p>
+    <input type="number" id="donateAmount" class="donate-amount" min="1" step="1" value="101" aria-label="Donation amount in rupees" placeholder="Amount (Rs)">
+    <div class="donate-actions">
+      <button type="button" id="donateConfirm" class="donate-btn">Continue to Pay</button>
+      <button type="button" id="donateCancel" class="donate-btn alt">Cancel</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>
 """
