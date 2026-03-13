@@ -745,7 +745,7 @@ HTML = """<!DOCTYPE html>
     <div class="topbar">
       <div class="brand">
         <span class="brand-badge">S</span>
-        <span>Swiggy-Style Converter</span>
+        <span>Swift Converter</span>
       </div>
       <div class="top-note">Fast, clean, and one-click file delivery</div>
     </div>
@@ -753,7 +753,7 @@ HTML = """<!DOCTYPE html>
       <div class="hero-grid">
         <div>
           <h1>Hungry for quick conversions?</h1>
-          <p>Upload PDFs or images, pick your format, and get instant downloadable files with a UI inspired by modern delivery apps.</p>
+          <p>Upload PDFs or images, pick your format, and get instantly.</p>
         </div>
         <div class="pill-row">
           <span class="pill">Lightning Fast</span>
