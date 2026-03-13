@@ -1260,6 +1260,14 @@ HTML = """<!DOCTYPE html>
     font-size: 1rem;
     font-weight: 800;
     box-shadow: 0 10px 22px rgba(252, 128, 25, .33);
+    border: none;
+    cursor: pointer;
+    transition: transform .15s ease, box-shadow .15s ease;
+  }
+
+  .brand-badge:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 12px 24px rgba(252, 128, 25, .38);
   }
 
   .top-note {
@@ -1317,7 +1325,12 @@ HTML = """<!DOCTYPE html>
     border-radius: 999px;
     font-size: .78rem;
     font-weight: 600;
+    animation: rise .5s ease-out both;
   }
+  .pill:nth-child(1) { animation-delay: .1s; }
+  .pill:nth-child(2) { animation-delay: .17s; }
+  .pill:nth-child(3) { animation-delay: .24s; }
+  .pill:nth-child(4) { animation-delay: .31s; }
 
   .tabs {
     display: flex;
@@ -1336,8 +1349,15 @@ HTML = """<!DOCTYPE html>
     font-weight: 700;
     color: var(--sw-muted);
     border-radius: 999px;
-    transition: all .15s;
+    transition: all .2s ease;
+    animation: rise .45s ease-out both;
   }
+  .tab-btn:nth-child(1) { animation-delay: .04s; }
+  .tab-btn:nth-child(2) { animation-delay: .09s; }
+  .tab-btn:nth-child(3) { animation-delay: .14s; }
+  .tab-btn:nth-child(4) { animation-delay: .19s; }
+  .tab-btn:nth-child(5) { animation-delay: .24s; }
+  .tab-btn:hover:not(.active) { transform: translateY(-1px); box-shadow: 0 4px 12px var(--sw-shadow); }
   .tab-btn.active {
     background: linear-gradient(135deg, var(--sw-orange), var(--sw-orange-deep));
     color: #fff;
@@ -1346,7 +1366,7 @@ HTML = """<!DOCTYPE html>
   }
 
   .tab-content { display: none; }
-  .tab-content.active { display: grid; }
+  .tab-content.active { display: grid; animation: tab-enter .3s ease-out; }
 
   main {
     max-width: 1140px;
@@ -1389,6 +1409,17 @@ HTML = """<!DOCTYPE html>
     font-size: .79rem;
     line-height: 1.45;
     color: var(--sw-muted);
+  }
+
+  .merge-tip-note {
+    margin-top: .5rem;
+    padding: .45rem .55rem;
+    border-left: 3px solid var(--sw-orange);
+    border-radius: 8px;
+    background: var(--sw-surface-tint);
+    color: var(--sw-ink);
+    font-size: .79rem;
+    line-height: 1.45;
   }
 
   .field-grid {
@@ -1484,6 +1515,7 @@ HTML = """<!DOCTYPE html>
     color: var(--sw-ink);
     border-color: #ffc799;
   }
+  .radio-group label:hover { transform: translateY(-1px); }
 
   .drop-zone {
     border: 2px dashed #ffcda2;
@@ -1496,7 +1528,9 @@ HTML = """<!DOCTYPE html>
     background: linear-gradient(180deg, var(--sw-surface-alt) 0%, var(--sw-card) 100%);
   }
 
-  .drop-zone:hover { transform: translateY(-2px); }
+  .drop-zone svg { transition: transform .22s ease; }
+  .drop-zone:hover { transform: translateY(-2px); box-shadow: 0 8px 22px var(--sw-shadow); }
+  .drop-zone:hover svg { transform: translateY(-4px) scale(1.12); }
   .drop-zone.dragover { border-color: var(--sw-orange); background: var(--sw-surface-tint); }
   .drop-zone input { display: none; }
 
@@ -1519,10 +1553,11 @@ HTML = """<!DOCTYPE html>
     box-shadow: 0 10px 20px var(--sw-btn-shadow);
   }
 
-  .btn:hover { transform: translateY(-1px); }
+  .btn:hover { transform: translateY(-1px); box-shadow: 0 14px 26px var(--sw-btn-shadow); }
+  .btn:active:not(:disabled) { transform: translateY(0) scale(.97); box-shadow: 0 6px 14px var(--sw-btn-shadow); }
   .btn:disabled { background: #aaa; cursor: not-allowed; }
 
-  .status { font-size: 0.85rem; margin-top: .8rem; min-height: 1.2rem; color: var(--sw-muted); }
+  .status { font-size: 0.85rem; margin-top: .8rem; min-height: 1.2rem; color: var(--sw-muted); animation: rise .3s ease-out; }
   .status.error { color: #c0392b; font-weight: 600; }
   .status.ok { color: #bdaea2; font-weight: 600; }
 
@@ -1540,7 +1575,11 @@ HTML = """<!DOCTYPE html>
     text-align: center;
     margin-top: .72rem;
     text-decoration: none;
+    transition: transform .15s ease, box-shadow .15s ease;
+    animation: rise .35s ease-out;
   }
+  .download-btn:hover { transform: translateY(-1px); box-shadow: 0 8px 20px rgba(31, 177, 109, .32); }
+  .download-btn:active { transform: translateY(0) scale(.97); }
 
   .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: .7rem; }
   .gallery img {
@@ -1550,10 +1589,11 @@ HTML = """<!DOCTYPE html>
     object-fit: contain;
     background: var(--sw-card);
     cursor: pointer;
-    transition: box-shadow .15s, transform .15s;
+    transition: box-shadow .2s ease, transform .2s ease;
+    animation: rise .4s ease-out both;
   }
 
-  .gallery img:hover { box-shadow: 0 4px 14px var(--sw-gallery-shadow); }
+  .gallery img:hover { box-shadow: 0 6px 18px var(--sw-gallery-shadow); transform: translateY(-3px) scale(1.02); }
   .empty {
     color: var(--sw-muted);
     font-size: 0.9rem;
@@ -1570,14 +1610,62 @@ HTML = """<!DOCTYPE html>
     from { opacity: 0; transform: translateY(10px); }
     to { opacity: 1; transform: translateY(0); }
   }
+  @keyframes pop-in {
+    from { opacity: 0; transform: scale(.88); }
+    to { opacity: 1; transform: scale(1); }
+  }
+  @keyframes tab-enter {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes lightbox-bg-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
 
   #lightbox { display:none; position:fixed; inset:0; background:var(--sw-overlay); z-index:100; align-items:center; justify-content:center; }
-  #lightbox.open { display:flex; }
-  #lightbox img { max-width:90vw; max-height:90vh; border-radius:8px; }
-  #lightbox-close { position:fixed; top:1rem; right:1.2rem; color:#fff; font-size:2rem; cursor:pointer; line-height:1; }
+  #lightbox.open { display:flex; animation: lightbox-bg-in .22s ease-out; }
+  #lightbox img { max-width:90vw; max-height:90vh; border-radius:8px; transition: transform .25s ease; }
+  #lightbox.open img { animation: pop-in .28s ease-out; }
+  #lightbox-close { position:fixed; top:1rem; right:1.2rem; color:#fff; font-size:2rem; cursor:pointer; line-height:1; transition: transform .15s ease, opacity .15s ease; }
+  #lightbox-close:hover { transform: scale(1.15); opacity: .8; }
   .file-list { list-style: none; margin-top: .5rem; }
-  .file-list li { font-size: 0.82rem; color: var(--sw-ink); padding: .15rem 0; display:flex; align-items:center; gap:.4rem; }
+  .file-list li { font-size: 0.82rem; color: var(--sw-ink); padding: .15rem 0; display:flex; align-items:center; gap:.4rem; animation: rise .3s ease-out both; }
   .file-list li .remove { color:#c0392b; cursor:pointer; font-weight:700; }
+  .file-list li.draggable-file {
+    padding: .45rem .55rem;
+    border: 1px solid var(--sw-line);
+    border-radius: 10px;
+    background: var(--sw-card);
+    cursor: grab;
+    transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease, background-color .16s ease;
+  }
+  .file-list li.draggable-file:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 8px 18px rgba(36, 28, 21, .09);
+  }
+  .file-list li.draggable-file.dragging {
+    opacity: .5;
+    transform: scale(1.01);
+    border-color: var(--sw-orange);
+  }
+  .file-list li.draggable-file.drag-target {
+    border-color: var(--sw-orange);
+    background: var(--sw-surface-tint);
+    box-shadow: 0 0 0 2px rgba(230, 126, 34, .12) inset;
+  }
+  .file-order-badge {
+    min-width: 1.4rem;
+    height: 1.4rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    background: var(--sw-surface-tint);
+    color: var(--sw-ink);
+    font-size: .7rem;
+    font-weight: 700;
+  }
 
   .btn-secondary {
     display: inline-block;
@@ -1591,7 +1679,10 @@ HTML = """<!DOCTYPE html>
     font-size: .8rem;
     font-weight: 700;
     cursor: pointer;
+    transition: background .15s ease, border-color .15s ease, transform .12s ease, box-shadow .12s ease;
   }
+  .btn-secondary:hover { transform: translateY(-1px); box-shadow: 0 5px 14px var(--sw-shadow); border-color: var(--sw-orange); }
+  .btn-secondary:active { transform: translateY(0) scale(.97); }
 
   .pdf-visual-grid {
     display: grid;
@@ -1660,7 +1751,10 @@ HTML = """<!DOCTYPE html>
     font-size: .75rem;
     font-weight: 700;
     cursor: pointer;
+    transition: background .15s ease, border-color .15s ease, transform .12s ease;
   }
+  .mini-btn:hover { transform: scale(1.05); background: var(--sw-accent-wash); border-color: var(--sw-orange); }
+  .mini-btn:active { transform: scale(.97); }
 
   .tick-btn {
     width: 100%;
@@ -1672,7 +1766,10 @@ HTML = """<!DOCTYPE html>
     cursor: pointer;
     color: var(--sw-ink);
     background: var(--sw-surface-alt);
+    transition: background .18s ease, color .18s ease, border-color .18s ease, transform .12s ease;
   }
+  .tick-btn:hover { transform: scale(1.03); }
+  .tick-btn:active { transform: scale(.96); }
 
   .tick-btn.on {
     color: #fff;
@@ -1702,7 +1799,7 @@ HTML = """<!DOCTYPE html>
   <div class="container">
     <div class="topbar">
       <div class="brand">
-        <span class="brand-badge">S</span>
+        <button type="button" id="themeToggle" class="brand-badge" aria-label="Toggle theme" title="Toggle theme"><span id="themeIcon">☀</span></button>
         <span>Swift Converter</span>
       </div>
       <div class="topbar-actions">
@@ -1827,7 +1924,7 @@ HTML = """<!DOCTYPE html>
 
     <div class="field">
       <div class="drop-zone" id="pdfEditDropZone">
-        <input type="file" id="pdfEditInput" accept=".pdf">
+        <input type="file" id="pdfEditInput" accept=".pdf" multiple>
         <svg width="36" height="36" fill="none" stroke="#bbb" stroke-width="1.5" viewBox="0 0 24 24"><path d="M12 16V4m0 0L8 8m4-4 4 4"/><rect x="3" y="16" width="18" height="5" rx="1.5"/></svg>
         <p id="pdfEditDropText">Click or drag a PDF here</p>
         <div class="filename" id="pdfEditFileNames"></div>
@@ -1837,6 +1934,7 @@ HTML = """<!DOCTYPE html>
 
     <div class="field">
       <div id="pdfEditOperationHelp" class="field-note">Load one PDF and drag cards to reorder pages. Use tick and rotate controls on each page card.</div>
+      <div class="merge-tip-note"><strong>Tip:</strong> upload two or more PDFs here to merge them into one file.</div>
     </div>
 
     <button class="btn" id="pdfEditBtn" onclick="modifyPdf()">Apply Page Edit</button>
@@ -1845,7 +1943,8 @@ HTML = """<!DOCTYPE html>
   </div>
 
   <div class="panel right">
-    <h2>Page Thumbnails</h2>
+    <h2 id="pdfEditSideTitle">Page Thumbnails</h2>
+    <div id="pdfMergeInfo" class="empty hidden">Merge mode combines all selected PDFs in the listed order.</div>
     <div class="field" id="pdfVisualField">
       <button type="button" class="btn-secondary" id="pdfVisualLoadBtn">Load Page Thumbnails</button>
       <div id="pdfVisualGrid" class="pdf-visual-grid"></div>
@@ -1950,19 +2049,29 @@ function switchTab(tab) {
   event.target.classList.add('active');
 }
 
-const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
+const themeToggle = document.getElementById("themeToggle");
+const themeIcon = document.getElementById("themeIcon");
 
 function applyTheme(theme) {
   const isDark = theme === "dark";
   document.body.classList.toggle("dark-mode", isDark);
+  themeIcon.textContent = isDark ? "☾" : "☀";
+  themeToggle.setAttribute("aria-label", isDark ? "Switch to light mode" : "Switch to dark mode");
+  themeToggle.setAttribute("title", isDark ? "Switch to light mode" : "Switch to dark mode");
 }
 
-function applySystemTheme() {
-  applyTheme(systemTheme.matches ? "dark" : "light");
+function getSavedTheme() {
+  const saved = localStorage.getItem("theme");
+  return saved === "dark" ? "dark" : "light";
 }
 
-applySystemTheme();
-systemTheme.addEventListener("change", applySystemTheme);
+applyTheme(getSavedTheme());
+
+themeToggle.addEventListener("click", () => {
+  const nextTheme = document.body.classList.contains("dark-mode") ? "light" : "dark";
+  applyTheme(nextTheme);
+  localStorage.setItem("theme", nextTheme);
+});
 
 const dropZone = document.getElementById("dropZone");
 const pdfInput = document.getElementById("pdfInput");
@@ -2026,8 +2135,8 @@ function renderGallery(images) {
   const g = document.getElementById("gallery");
   if (!images.length) { g.innerHTML = '<p class="empty">No images.</p>'; return; }
   g.className = "gallery";
-  g.innerHTML = images.map(src =>
-    `<img src="${src}" loading="lazy" alt="" onclick="openLightbox('${src}')">`
+  g.innerHTML = images.map((src, i) =>
+    `<img src="${src}" loading="lazy" alt="" style="animation-delay:${(i * 0.06).toFixed(2)}s" onclick="openLightbox('${src}')">`
   ).join("");
 }
 
@@ -2061,7 +2170,7 @@ function removeImage(i) {
 function renderImgList() {
   const ul = document.getElementById("imgFileList");
   ul.innerHTML = imgFiles.map((f, i) =>
-    `<li><span class="remove" onclick="removeImage(${i})">&times;</span> ${f.name}</li>`
+    `<li style="animation-delay:${(i * 0.05).toFixed(2)}s"><span class="remove" onclick="removeImage(${i})">&times;</span> ${f.name}</li>`
   ).join("");
   document.getElementById("imgFileNames").textContent =
     imgFiles.length ? imgFiles.length + " image(s) selected" : "";
@@ -2072,10 +2181,11 @@ function renderImgPreview() {
   if (!imgFiles.length) { g.className = "empty"; g.innerHTML = "Selected images will appear here."; return; }
   g.className = "gallery";
   g.innerHTML = "";
-  imgFiles.forEach(f => {
+  imgFiles.forEach((f, i) => {
     const img = document.createElement("img");
     img.src = URL.createObjectURL(f);
     img.loading = "lazy";
+    img.style.animationDelay = `${(i * 0.06).toFixed(2)}s`;
     img.onclick = () => openLightbox(img.src);
     g.appendChild(img);
   });
@@ -2136,6 +2246,8 @@ const pdfEditFileList = document.getElementById("pdfEditFileList");
 const pdfEditOperationHelp = document.getElementById("pdfEditOperationHelp");
 const pdfEditDropText = document.getElementById("pdfEditDropText");
 const pdfEditBtn = document.getElementById("pdfEditBtn");
+const pdfEditSideTitle = document.getElementById("pdfEditSideTitle");
+const pdfMergeInfo = document.getElementById("pdfMergeInfo");
 const pdfVisualField = document.getElementById("pdfVisualField");
 const pdfVisualLoadBtn = document.getElementById("pdfVisualLoadBtn");
 const pdfVisualGrid = document.getElementById("pdfVisualGrid");
@@ -2160,10 +2272,59 @@ function isPdfFile(file) {
 }
 
 function renderPdfEditFiles() {
-  pdfEditFileList.innerHTML = pdfEditFiles.map((file, index) =>
-    `<li><span class="remove" onclick="removePdfEditFile(${index})">&times;</span> ${file.name}</li>`
-  ).join("");
+  pdfEditFileList.innerHTML = pdfEditFiles.map((file, index) => {
+    const mergeMode = isPdfMergeMode();
+    const itemClass = mergeMode ? "draggable-file" : "";
+    const orderBadge = mergeMode ? `<span class="file-order-badge">${index + 1}</span>` : "";
+    const dragAttr = mergeMode ? 'draggable="true"' : "";
+    return `<li class="${itemClass}" data-index="${index}" ${dragAttr} style="animation-delay:${(index * 0.05).toFixed(2)}s"><span class="remove" onclick="removePdfEditFile(${index})">&times;</span>${orderBadge}<span>${file.name}</span></li>`;
+  }).join("");
   pdfEditFileNames.textContent = pdfEditFiles.length ? `${pdfEditFiles.length} PDF file(s) selected` : "";
+
+  if (!isPdfMergeMode()) return;
+
+  let dragIndex = null;
+  const clearDragTargets = () => {
+    pdfEditFileList.querySelectorAll("li.drag-target").forEach((node) => node.classList.remove("drag-target"));
+  };
+
+  pdfEditFileList.querySelectorAll("li.draggable-file").forEach((item) => {
+    item.addEventListener("dragstart", (event) => {
+      dragIndex = Number(item.dataset.index);
+      item.classList.add("dragging");
+      event.dataTransfer.effectAllowed = "move";
+    });
+    item.addEventListener("dragend", () => {
+      item.classList.remove("dragging");
+      clearDragTargets();
+      dragIndex = null;
+    });
+    item.addEventListener("dragenter", (event) => {
+      event.preventDefault();
+      const hoverIndex = Number(item.dataset.index);
+      if (!Number.isFinite(dragIndex) || hoverIndex === dragIndex) return;
+      clearDragTargets();
+      item.classList.add("drag-target");
+    });
+    item.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+    });
+    item.addEventListener("dragleave", (event) => {
+      if (!item.contains(event.relatedTarget)) {
+        item.classList.remove("drag-target");
+      }
+    });
+    item.addEventListener("drop", (event) => {
+      event.preventDefault();
+      clearDragTargets();
+      const dropIndex = Number(item.dataset.index);
+      if (!Number.isFinite(dragIndex) || dragIndex === dropIndex) return;
+      const [moved] = pdfEditFiles.splice(dragIndex, 1);
+      pdfEditFiles.splice(dropIndex, 0, moved);
+      renderPdfEditFiles();
+    });
+  });
 }
 
 function getPdfEditFileKey(file) {
@@ -2175,6 +2336,10 @@ function normalizeRotation(value) {
   return [0, 90, 180, 270].includes(normalized) ? normalized : 0;
 }
 
+function isPdfMergeMode() {
+  return pdfEditFiles.length > 1;
+}
+
 function renderPdfVisualGrid() {
   if (!pdfVisualPages.length) {
     pdfVisualGrid.innerHTML = "";
@@ -2182,7 +2347,7 @@ function renderPdfVisualGrid() {
   }
 
   pdfVisualGrid.innerHTML = pdfVisualPages.map((page, index) => `
-    <div class="pdf-page-card" draggable="true" data-index="${index}">
+    <div class="pdf-page-card" draggable="true" data-index="${index}" style="animation-delay:${(index * 0.05).toFixed(2)}s">
       <img class="pdf-thumb" src="${page.thumb}" alt="Page ${page.page}">
       <div class="pdf-page-meta">
         <span>Page ${page.page}</span>
@@ -2334,6 +2499,7 @@ function addPdfEditFiles(fileList) {
     pdfVisualLoadedKey = "";
     renderPdfVisualGrid();
   }
+  updatePdfEditUI();
 }
 
 function removePdfEditFile(index) {
@@ -2344,13 +2510,27 @@ function removePdfEditFile(index) {
     pdfVisualLoadedKey = "";
     renderPdfVisualGrid();
   }
+  updatePdfEditUI();
 }
 
 function updatePdfEditUI() {
+  if (isPdfMergeMode()) {
+    pdfEditOperationHelp.textContent = "Add two or more PDFs to merge them into one file. Drag the selected files to change the merge order.";
+    pdfEditDropText.textContent = "Click or drag PDF files here";
+    pdfEditBtn.textContent = "Merge PDFs";
+    document.getElementById("pdfEditDownload").textContent = "Download Merged PDF";
+    pdfEditSideTitle.textContent = "Merge Preview";
+    pdfMergeInfo.classList.remove("hidden");
+    pdfVisualField.classList.add("hidden");
+    return;
+  }
+
   pdfEditOperationHelp.textContent = "Load one PDF and drag cards to reorder pages. Use tick and rotate controls on each page card.";
   pdfEditDropText.textContent = "Click or drag a PDF here";
   pdfEditBtn.textContent = "Apply Page Edit";
   document.getElementById("pdfEditDownload").textContent = "Download Edited PDF";
+  pdfEditSideTitle.textContent = "Page Thumbnails";
+  pdfMergeInfo.classList.add("hidden");
   pdfVisualField.classList.remove("hidden");
 }
 
@@ -2439,6 +2619,9 @@ async function compressPdfFile() {
       <p><strong>Compressed:</strong> ${formatBytes(data.compressed_bytes)}</p>
       <p><strong>Reduction:</strong> ${data.reduction_percent}%</p>
     `;
+    result.style.animation = "none";
+    void result.offsetHeight;
+    result.style.animation = "rise .4s ease-out";
 
     if (forceText) {
       setStatus("compressStatus", `Compression complete. ${hitTargetText}.${forceText}`, "ok");
@@ -2489,6 +2672,9 @@ async function compressImageFile() {
       <p><strong>Compressed:</strong> ${formatBytes(data.compressed_bytes)}</p>
       <p><strong>Reduction:</strong> ${data.reduction_percent}%</p>
     `;
+    result.style.animation = "none";
+    void result.offsetHeight;
+    result.style.animation = "rise .4s ease-out";
 
     if (forceText) {
       setStatus("imgCompressStatus", `Compression complete. ${hitTargetText}.${forceText}`, "ok");
@@ -2507,8 +2693,46 @@ async function compressImageFile() {
 }
 
 async function modifyPdf() {
-  const operation = "visual_edit";
   const btn = pdfEditBtn;
+
+  if (!pdfEditFiles.length) {
+    setStatus("pdfEditStatus", "Please select at least one PDF file.", "error");
+    return;
+  }
+
+  if (isPdfMergeMode()) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Merging...';
+    setStatus("pdfEditStatus", "Uploading and merging PDFs...", "");
+
+    const form = new FormData();
+    form.append("operation", "merge");
+    pdfEditFiles.forEach((file) => form.append("pdfs", file));
+
+    try {
+      const res = await fetch("/modify-pdf", { method: "POST", body: form });
+      const data = await res.json();
+      if (!res.ok) {
+        setStatus("pdfEditStatus", data.error || "PDF merge failed.", "error");
+        return;
+      }
+
+      setStatus("pdfEditStatus", data.summary || "PDFs merged successfully.", "ok");
+
+      const dl = document.getElementById("pdfEditDownload");
+      dl.dataset.url = data.file;
+      dl.dataset.name = data.filename || "merged-document.pdf";
+      dl.style.display = "block";
+    } catch (e) {
+      setStatus("pdfEditStatus", "Network error: " + e.message, "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Merge PDFs";
+    }
+    return;
+  }
+
+  const operation = "visual_edit";
 
   if (pdfEditFiles.length !== 1) {
     setStatus("pdfEditStatus", "This operation requires exactly one PDF file.", "error");
@@ -2563,7 +2787,13 @@ async function modifyPdf() {
 
 function setStatus(id, msg, cls) {
   const el = document.getElementById(id);
-  el.textContent = msg; el.className = "status " + cls;
+  el.className = "status " + cls;
+  el.textContent = msg;
+  if (msg) {
+    el.style.animation = "none";
+    void el.offsetHeight;
+    el.style.animation = "";
+  }
 }
 
 function parseDownloadName(contentDisposition, fallbackName) {
