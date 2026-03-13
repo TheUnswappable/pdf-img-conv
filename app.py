@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import uuid
 import zipfile
 import tempfile
@@ -150,6 +151,59 @@ def parse_page_range(page_range_str: str, total_pages: int) -> list:
                 )
             indices.add(n - 1)
     return sorted(indices)
+
+
+def parse_page_order(page_order_str: str, total_pages: int) -> list:
+    s = page_order_str.strip().lower()
+    if s == "" or s == "all":
+        return list(range(total_pages))
+
+    ordered_pages = []
+    for part in s.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            m = re.fullmatch(r"(\d+)\s*-\s*(\d+)", part)
+            if not m:
+                raise ValueError(f"Invalid range: '{part}'")
+            start, end = int(m.group(1)), int(m.group(2))
+            if start < 1 or start > total_pages or end < 1 or end > total_pages:
+                raise ValueError(
+                    f"Range '{part}' out of bounds (doc has {total_pages} pages)"
+                )
+            step = 1 if end >= start else -1
+            ordered_pages.extend(range(start - 1, end - 1 + step, step))
+        else:
+            if not part.isdigit():
+                raise ValueError(f"Invalid page: '{part}'")
+            page_number = int(part)
+            if page_number < 1 or page_number > total_pages:
+                raise ValueError(
+                    f"Page {page_number} out of bounds (doc has {total_pages} pages)"
+                )
+            ordered_pages.append(page_number - 1)
+
+    if not ordered_pages:
+        raise ValueError("No pages selected.")
+    return ordered_pages
+
+
+def parse_page_groups(groups_str: str, total_pages: int) -> list:
+    s = groups_str.strip().lower()
+    if s == "" or s == "all":
+        return [[page_index] for page_index in range(total_pages)]
+
+    groups = []
+    for chunk in groups_str.split(";"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        groups.append(parse_page_order(chunk, total_pages))
+
+    if not groups:
+        raise ValueError("No split groups were provided.")
+    return groups
 
 
 def cleanup_old_sessions():
@@ -745,6 +799,332 @@ def compress_image():
         return jsonify({"error": f"Image compression failed: {e}"}), 500
 
 
+@app.route("/modify-pdf", methods=["POST"])
+def modify_pdf():
+    operation = request.form.get("operation", "").strip().lower()
+    allowed_operations = {
+        "merge",
+        "split",
+        "rotate",
+        "crop",
+        "delete",
+        "extract",
+        "organize",
+      "visual_edit",
+    }
+    if operation not in allowed_operations:
+        return jsonify({"error": "Invalid PDF edit operation."}), 400
+
+    session_id = uuid.uuid4().hex
+    tmp_dir = tempfile.mkdtemp(prefix=f"pdfedit_{session_id}_")
+
+    try:
+        import shutil
+
+        uploaded_pdfs = [
+            file
+            for file in request.files.getlist("pdfs")
+            if file and file.filename and file.filename.lower().endswith(".pdf")
+        ]
+        single_pdf = request.files.get("pdf")
+        if (
+            single_pdf
+            and single_pdf.filename
+            and single_pdf.filename.lower().endswith(".pdf")
+        ):
+            uploaded_pdfs = [single_pdf]
+
+        output_name = ""
+        summary = ""
+        output_count = 1
+        page_count = 0
+
+        if operation == "merge":
+            if len(uploaded_pdfs) < 2:
+                return jsonify({"error": "Merge requires at least two PDF files."}), 400
+
+            merged_doc = fitz.open()
+            merged_pages = 0
+            try:
+                for index, pdf_file in enumerate(uploaded_pdfs):
+                    input_path = os.path.join(tmp_dir, f"merge_{index}.pdf")
+                    pdf_file.save(input_path)
+                    source_doc = fitz.open(input_path)
+                    try:
+                        if source_doc.needs_pass:
+                            return jsonify(
+                                {"error": "Password-protected PDFs are not supported."}
+                            ), 400
+                        merged_doc.insert_pdf(source_doc)
+                        merged_pages += len(source_doc)
+                    finally:
+                        source_doc.close()
+
+                output_name = "merged-document.pdf"
+                output_path = os.path.join(tmp_dir, output_name)
+                merged_doc.save(output_path)
+            finally:
+                merged_doc.close()
+
+            summary = f"Merged {len(uploaded_pdfs)} PDFs into one file."
+            page_count = merged_pages
+
+        else:
+            if len(uploaded_pdfs) != 1:
+                return jsonify(
+                    {"error": "This operation requires exactly one PDF file."}
+                ), 400
+
+            pdf_file = uploaded_pdfs[0]
+            input_path = os.path.join(tmp_dir, "input.pdf")
+            pdf_file.save(input_path)
+            source_doc = fitz.open(input_path)
+            if source_doc.needs_pass:
+                source_doc.close()
+                return jsonify({"error": "Password-protected PDFs are not supported."}), 400
+
+            total_pages = len(source_doc)
+            base_name = os.path.splitext(os.path.basename(pdf_file.filename))[0] or "document"
+
+            if operation == "split":
+                page_groups = parse_page_groups(
+                    request.form.get("page_groups", ""), total_pages
+                )
+                output_name = f"split-{base_name}.zip"
+                output_path = os.path.join(tmp_dir, output_name)
+
+                with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as archive:
+                    for group_index, page_group in enumerate(page_groups, start=1):
+                        part_doc = fitz.open()
+                        try:
+                            for page_index in page_group:
+                                part_doc.insert_pdf(
+                                    source_doc,
+                                    from_page=page_index,
+                                    to_page=page_index,
+                                )
+                            part_name = f"{base_name}-part-{group_index:02d}.pdf"
+                            part_path = os.path.join(tmp_dir, part_name)
+                            part_doc.save(part_path)
+                            archive.write(part_path, arcname=part_name)
+                        finally:
+                            part_doc.close()
+
+                output_count = len(page_groups)
+                page_count = sum(len(group) for group in page_groups)
+                summary = f"Split the PDF into {output_count} file(s)."
+
+            elif operation == "rotate":
+                page_indices = parse_page_range(
+                    request.form.get("pages", "all"), total_pages
+                )
+                rotation = int(request.form.get("rotation", 90))
+                if rotation not in (90, 180, 270):
+                    source_doc.close()
+                    return jsonify(
+                        {"error": "Rotation must be 90, 180, or 270 degrees."}
+                    ), 400
+
+                for page_index in page_indices:
+                    page = source_doc[page_index]
+                    page.set_rotation((page.rotation + rotation) % 360)
+
+                output_name = f"rotated-{base_name}.pdf"
+                output_path = os.path.join(tmp_dir, output_name)
+                source_doc.save(output_path)
+                page_count = total_pages
+                summary = f"Rotated {len(page_indices)} page(s) by {rotation} degrees."
+
+            elif operation == "crop":
+                page_indices = parse_page_range(
+                    request.form.get("pages", "all"), total_pages
+                )
+                crop_top = float(request.form.get("crop_top", 0) or 0)
+                crop_right = float(request.form.get("crop_right", 0) or 0)
+                crop_bottom = float(request.form.get("crop_bottom", 0) or 0)
+                crop_left = float(request.form.get("crop_left", 0) or 0)
+
+                for value in (crop_top, crop_right, crop_bottom, crop_left):
+                    if value < 0 or value > 45:
+                        source_doc.close()
+                        return jsonify(
+                            {"error": "Crop values must be between 0 and 45 percent."}
+                        ), 400
+
+                if crop_top + crop_bottom >= 90 or crop_left + crop_right >= 90:
+                    source_doc.close()
+                    return jsonify(
+                        {"error": "Crop values are too large for the page size."}
+                    ), 400
+
+                for page_index in page_indices:
+                    page = source_doc[page_index]
+                    rect = page.rect
+                    x0 = rect.x0 + (rect.width * (crop_left / 100.0))
+                    y0 = rect.y0 + (rect.height * (crop_top / 100.0))
+                    x1 = rect.x1 - (rect.width * (crop_right / 100.0))
+                    y1 = rect.y1 - (rect.height * (crop_bottom / 100.0))
+                    cropped_rect = fitz.Rect(x0, y0, x1, y1)
+                    if cropped_rect.width < 36 or cropped_rect.height < 36:
+                        source_doc.close()
+                        return jsonify(
+                            {"error": "Crop values leave too little visible page area."}
+                        ), 400
+                    page.set_cropbox(cropped_rect)
+
+                output_name = f"cropped-{base_name}.pdf"
+                output_path = os.path.join(tmp_dir, output_name)
+                source_doc.save(output_path)
+                page_count = total_pages
+                summary = f"Cropped {len(page_indices)} page(s)."
+
+            elif operation == "delete":
+                page_indices = parse_page_range(
+                    request.form.get("pages", "all"), total_pages
+                )
+                if len(page_indices) >= total_pages:
+                    source_doc.close()
+                    return jsonify(
+                        {"error": "You cannot delete every page from the PDF."}
+                    ), 400
+
+                for page_index in sorted(page_indices, reverse=True):
+                    source_doc.delete_page(page_index)
+
+                output_name = f"deleted-pages-{base_name}.pdf"
+                output_path = os.path.join(tmp_dir, output_name)
+                source_doc.save(output_path)
+                page_count = len(source_doc)
+                summary = f"Deleted {len(page_indices)} page(s)."
+
+            elif operation == "extract":
+                page_indices = parse_page_range(
+                    request.form.get("pages", "all"), total_pages
+                )
+                extracted_doc = fitz.open()
+                try:
+                    for page_index in page_indices:
+                        extracted_doc.insert_pdf(
+                            source_doc,
+                            from_page=page_index,
+                            to_page=page_index,
+                        )
+
+                    output_name = f"extracted-{base_name}.pdf"
+                    output_path = os.path.join(tmp_dir, output_name)
+                    extracted_doc.save(output_path)
+                finally:
+                    extracted_doc.close()
+
+                page_count = len(page_indices)
+                summary = f"Extracted {len(page_indices)} page(s) into a new PDF."
+
+            elif operation == "organize":
+                page_order = parse_page_order(
+                    request.form.get("page_order", "all"), total_pages
+                )
+                organized_doc = fitz.open()
+                try:
+                    for page_index in page_order:
+                        organized_doc.insert_pdf(
+                            source_doc,
+                            from_page=page_index,
+                            to_page=page_index,
+                        )
+
+                    output_name = f"organized-{base_name}.pdf"
+                    output_path = os.path.join(tmp_dir, output_name)
+                    organized_doc.save(output_path)
+                finally:
+                    organized_doc.close()
+
+                page_count = len(page_order)
+                summary = (
+                    f"Organized the PDF into {len(page_order)} ordered page slot(s)."
+                )
+
+            elif operation == "visual_edit":
+                slots_raw = (request.form.get("slots_json", "") or "").strip()
+                if not slots_raw:
+                  raise ValueError("No page edits were provided.")
+
+                try:
+                    slots = json.loads(slots_raw)
+                except json.JSONDecodeError as e:
+                  raise ValueError(f"Invalid edit payload: {e}")
+
+                if not isinstance(slots, list) or not slots:
+                  raise ValueError("Edit must include at least one page slot.")
+
+                edited_doc = fitz.open()
+                try:
+                    for slot in slots:
+                        if not isinstance(slot, dict):
+                          raise ValueError("Each slot must be an object.")
+
+                        page_number = int(slot.get("page", 0))
+                        rotation = int(slot.get("rotation", 0))
+                        if page_number < 1 or page_number > total_pages:
+                            raise ValueError(
+                                f"Page {page_number} out of bounds (doc has {total_pages} pages)"
+                            )
+                        if rotation not in (0, 90, 180, 270):
+                          raise ValueError(
+                            "Rotation must be one of 0, 90, 180, or 270."
+                          )
+
+                        edited_doc.insert_pdf(
+                            source_doc,
+                            from_page=page_number - 1,
+                            to_page=page_number - 1,
+                        )
+                        edited_doc[-1].set_rotation(rotation)
+
+                    output_name = f"edited-{base_name}.pdf"
+                    output_path = os.path.join(tmp_dir, output_name)
+                    edited_doc.save(output_path)
+                finally:
+                    edited_doc.close()
+
+                page_count = len(slots)
+                summary = f"Applied page edits to {len(slots)} slot(s)."
+
+            else:
+                source_doc.close()
+                return jsonify({"error": "Unsupported PDF operation."}), 400
+
+            source_doc.close()
+
+        SESSIONS[session_id] = {
+            "dir": tmp_dir,
+            "file": output_name,
+            "created": time.time(),
+        }
+
+        return jsonify(
+            {
+                "session": session_id,
+                "operation": operation,
+                "file": f"/download/{session_id}/{output_name}",
+                "filename": output_name,
+                "page_count": page_count,
+                "output_count": output_count,
+                "summary": summary,
+            }
+        )
+
+    except ValueError as e:
+        import shutil
+
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        import shutil
+
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return jsonify({"error": f"PDF edit failed: {e}"}), 500
+
+
 @app.route("/file/<session_id>/<filename>")
 def serve_file(session_id, filename):
     meta = SESSIONS.get(session_id)
@@ -941,6 +1321,7 @@ HTML = """<!DOCTYPE html>
 
   .tabs {
     display: flex;
+    flex-wrap: wrap;
     gap: .6rem;
     max-width: 1140px;
     margin: .7rem auto 0;
@@ -1002,6 +1383,19 @@ HTML = """<!DOCTYPE html>
   }
 
   .field { margin-bottom: .85rem; }
+  .hidden { display: none !important; }
+
+  .field-note {
+    font-size: .79rem;
+    line-height: 1.45;
+    color: var(--sw-muted);
+  }
+
+  .field-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: .65rem;
+  }
 
   .range-wrap {
     display: grid;
@@ -1049,7 +1443,7 @@ HTML = """<!DOCTYPE html>
     color: var(--sw-muted);
   }
 
-  input[type=text], select {
+  input[type=text], input[type=number], select {
     width: 100%;
     padding: .66rem .72rem;
     border: 1px solid var(--sw-line);
@@ -1061,7 +1455,7 @@ HTML = """<!DOCTYPE html>
     color: var(--sw-ink);
   }
 
-  input[type=text]:focus, select:focus {
+  input[type=text]:focus, input[type=number]:focus, select:focus {
     border-color: #ffc799;
     box-shadow: 0 0 0 4px rgba(252, 128, 25, .13);
   }
@@ -1185,12 +1579,121 @@ HTML = """<!DOCTYPE html>
   .file-list li { font-size: 0.82rem; color: var(--sw-ink); padding: .15rem 0; display:flex; align-items:center; gap:.4rem; }
   .file-list li .remove { color:#c0392b; cursor:pointer; font-weight:700; }
 
+  .btn-secondary {
+    display: inline-block;
+    width: auto;
+    padding: .52rem .72rem;
+    margin-top: .35rem;
+    border-radius: 10px;
+    border: 1px solid var(--sw-line);
+    background: var(--sw-card);
+    color: var(--sw-ink);
+    font-size: .8rem;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  .pdf-visual-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: .65rem;
+    margin-top: .55rem;
+  }
+
+  .pdf-page-card {
+    border: 1px solid var(--sw-line);
+    border-radius: 12px;
+    background: var(--sw-card);
+    padding: .5rem;
+    cursor: grab;
+    transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease, background-color .16s ease;
+  }
+
+  .pdf-page-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 22px rgba(36, 28, 21, .12);
+  }
+
+  .pdf-page-card.dragging {
+    opacity: .5;
+    transform: rotate(1deg) scale(1.02);
+    border-color: var(--sw-orange);
+    box-shadow: 0 16px 26px rgba(36, 28, 21, .18);
+  }
+
+  .pdf-page-card.drag-target {
+    border-color: var(--sw-orange);
+    background: var(--sw-surface-tint);
+    box-shadow: 0 0 0 2px rgba(230, 126, 34, .18) inset;
+  }
+
+  .pdf-thumb {
+    width: 100%;
+    border-radius: 8px;
+    border: 1px solid var(--sw-line);
+    background: var(--sw-surface-alt);
+    display: block;
+    margin-bottom: .45rem;
+  }
+
+  .pdf-page-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: .75rem;
+    color: var(--sw-muted);
+    margin-bottom: .35rem;
+  }
+
+  .pdf-page-actions {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: .3rem;
+  }
+
+  .mini-btn {
+    padding: .38rem .3rem;
+    border: 1px solid var(--sw-line);
+    border-radius: 8px;
+    background: var(--sw-surface-tint);
+    color: var(--sw-ink);
+    font-size: .75rem;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  .tick-btn {
+    width: 100%;
+    padding: .36rem .3rem;
+    border: 1px solid var(--sw-line);
+    border-radius: 8px;
+    font-size: .74rem;
+    font-weight: 700;
+    cursor: pointer;
+    color: var(--sw-ink);
+    background: var(--sw-surface-alt);
+  }
+
+  .tick-btn.on {
+    color: #fff;
+    border-color: transparent;
+    background: linear-gradient(135deg, var(--sw-green), #1f8c4d);
+  }
+
+  .pdf-rotation {
+    text-align: center;
+    margin-top: .3rem;
+    font-size: .73rem;
+    color: var(--sw-muted);
+  }
+
   @media (max-width: 920px) {
     .hero-grid { grid-template-columns: 1fr; }
     .pill-row { justify-content: flex-start; }
     main { grid-template-columns: 1fr; }
     .topbar { align-items: flex-start; }
     .topbar-actions { width: 100%; }
+    .field-grid { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -1209,7 +1712,7 @@ HTML = """<!DOCTYPE html>
     <div class="hero-card">
       <div class="hero-grid">
         <div>
-          <h1>Hungry for quick conversions?</h1>
+          <h1>Quick conversions?</h1>
           <p>Upload PDFs or images, pick your format, and get instantly.</p>
         </div>
         <div class="pill-row">
@@ -1226,6 +1729,7 @@ HTML = """<!DOCTYPE html>
 <div class="tabs">
   <button class="tab-btn active" onclick="switchTab('pdf2img')">PDF &rarr; Image</button>
   <button class="tab-btn" onclick="switchTab('img2pdf')">Image &rarr; PDF</button>
+  <button class="tab-btn" onclick="switchTab('pdfedit')">Edit PDF</button>
   <button class="tab-btn" onclick="switchTab('pdfcompress')">Compress PDF</button>
   <button class="tab-btn" onclick="switchTab('imgcompress')">Compress Image</button>
 </div>
@@ -1302,7 +1806,7 @@ HTML = """<!DOCTYPE html>
     <div class="field">
       <div class="force-row">
         <input type="checkbox" id="imgForceCompression">
-        <label for="imgForceCompression" class="check-label">Force compression (may reduce visual quality)</label>
+        <label for="imgForceCompression" class="check-label">Force compression (may reduce image quality)</label>
       </div>
     </div>
 
@@ -1314,6 +1818,38 @@ HTML = """<!DOCTYPE html>
   <div class="panel right">
     <h2>Compression Result</h2>
     <div id="imgCompressResult" class="empty">Image compression details will appear here.</div>
+  </div>
+</main>
+
+<main id="tab-pdfedit" class="tab-content">
+  <div class="panel">
+    <h2>Edit Pages</h2>
+
+    <div class="field">
+      <div class="drop-zone" id="pdfEditDropZone">
+        <input type="file" id="pdfEditInput" accept=".pdf">
+        <svg width="36" height="36" fill="none" stroke="#bbb" stroke-width="1.5" viewBox="0 0 24 24"><path d="M12 16V4m0 0L8 8m4-4 4 4"/><rect x="3" y="16" width="18" height="5" rx="1.5"/></svg>
+        <p id="pdfEditDropText">Click or drag a PDF here</p>
+        <div class="filename" id="pdfEditFileNames"></div>
+      </div>
+      <ul class="file-list" id="pdfEditFileList"></ul>
+    </div>
+
+    <div class="field">
+      <div id="pdfEditOperationHelp" class="field-note">Load one PDF and drag cards to reorder pages. Use tick and rotate controls on each page card.</div>
+    </div>
+
+    <button class="btn" id="pdfEditBtn" onclick="modifyPdf()">Apply Page Edit</button>
+    <div id="pdfEditStatus" class="status"></div>
+    <a id="pdfEditDownload" class="download-btn" download>Download Edited PDF</a>
+  </div>
+
+  <div class="panel right">
+    <h2>Page Thumbnails</h2>
+    <div class="field" id="pdfVisualField">
+      <button type="button" class="btn-secondary" id="pdfVisualLoadBtn">Load Page Thumbnails</button>
+      <div id="pdfVisualGrid" class="pdf-visual-grid"></div>
+    </div>
   </div>
 </main>
 
@@ -1341,7 +1877,7 @@ HTML = """<!DOCTYPE html>
     <div class="field">
       <div class="force-row">
         <input type="checkbox" id="forceCompression">
-        <label for="forceCompression" class="check-label">Force compression (may reduce visual quality)</label>
+        <label for="forceCompression" class="check-label">Force compression (may reduce image quality)</label>
       </div>
     </div>
 
@@ -1405,6 +1941,7 @@ HTML = """<!DOCTYPE html>
   <img id="lightboxImg" src="" alt="">
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script>
 function switchTab(tab) {
   document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
@@ -1592,6 +2129,24 @@ const imgTargetReduction = document.getElementById("imgTargetReduction");
 const imgTargetReductionValue = document.getElementById("imgTargetReductionValue");
 const imgForceCompression = document.getElementById("imgForceCompression");
 
+const pdfEditDropZone = document.getElementById("pdfEditDropZone");
+const pdfEditInput = document.getElementById("pdfEditInput");
+const pdfEditFileNames = document.getElementById("pdfEditFileNames");
+const pdfEditFileList = document.getElementById("pdfEditFileList");
+const pdfEditOperationHelp = document.getElementById("pdfEditOperationHelp");
+const pdfEditDropText = document.getElementById("pdfEditDropText");
+const pdfEditBtn = document.getElementById("pdfEditBtn");
+const pdfVisualField = document.getElementById("pdfVisualField");
+const pdfVisualLoadBtn = document.getElementById("pdfVisualLoadBtn");
+const pdfVisualGrid = document.getElementById("pdfVisualGrid");
+let pdfEditFiles = [];
+let pdfVisualPages = [];
+let pdfVisualLoadedKey = "";
+
+if (window.pdfjsLib && window.pdfjsLib.GlobalWorkerOptions) {
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+}
+
 targetReduction.addEventListener("input", () => {
   targetReductionValue.textContent = `${targetReduction.value}%`;
 });
@@ -1599,6 +2154,217 @@ targetReduction.addEventListener("input", () => {
 imgTargetReduction.addEventListener("input", () => {
   imgTargetReductionValue.textContent = `${imgTargetReduction.value}%`;
 });
+
+function isPdfFile(file) {
+  return file && file.name && file.name.toLowerCase().endsWith(".pdf");
+}
+
+function renderPdfEditFiles() {
+  pdfEditFileList.innerHTML = pdfEditFiles.map((file, index) =>
+    `<li><span class="remove" onclick="removePdfEditFile(${index})">&times;</span> ${file.name}</li>`
+  ).join("");
+  pdfEditFileNames.textContent = pdfEditFiles.length ? `${pdfEditFiles.length} PDF file(s) selected` : "";
+}
+
+function getPdfEditFileKey(file) {
+  return `${file.name}:${file.size}:${file.lastModified}`;
+}
+
+function normalizeRotation(value) {
+  const normalized = ((value % 360) + 360) % 360;
+  return [0, 90, 180, 270].includes(normalized) ? normalized : 0;
+}
+
+function renderPdfVisualGrid() {
+  if (!pdfVisualPages.length) {
+    pdfVisualGrid.innerHTML = "";
+    return;
+  }
+
+  pdfVisualGrid.innerHTML = pdfVisualPages.map((page, index) => `
+    <div class="pdf-page-card" draggable="true" data-index="${index}">
+      <img class="pdf-thumb" src="${page.thumb}" alt="Page ${page.page}">
+      <div class="pdf-page-meta">
+        <span>Page ${page.page}</span>
+        <span>Slot ${index + 1}</span>
+      </div>
+      <button type="button" class="tick-btn ${page.include ? "on" : ""}" data-action="toggle-select" data-index="${index}">
+        ${page.include ? "✓" : "❌"}
+      </button>
+      <div class="pdf-page-actions">
+        <button type="button" class="mini-btn" data-action="rotate-left" data-index="${index}">Rotate -90</button>
+        <button type="button" class="mini-btn" data-action="rotate-right" data-index="${index}">Rotate +90</button>
+      </div>
+      <div class="pdf-rotation">Rotation: ${page.rotation}&deg;</div>
+    </div>
+  `).join("");
+
+  let dragIndex = null;
+  const clearDragTarget = () => {
+    pdfVisualGrid.querySelectorAll(".pdf-page-card.drag-target").forEach((node) => {
+      node.classList.remove("drag-target");
+    });
+  };
+
+  pdfVisualGrid.querySelectorAll(".pdf-page-card").forEach((card) => {
+    card.addEventListener("dragstart", (e) => {
+      dragIndex = Number(card.dataset.index);
+      card.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+    });
+    card.addEventListener("dragend", () => {
+      card.classList.remove("dragging");
+      clearDragTarget();
+      dragIndex = null;
+    });
+    card.addEventListener("dragenter", (e) => {
+      e.preventDefault();
+      const hoverIndex = Number(card.dataset.index);
+      if (!Number.isFinite(dragIndex) || hoverIndex === dragIndex) return;
+      clearDragTarget();
+      card.classList.add("drag-target");
+    });
+    card.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+    });
+    card.addEventListener("dragleave", (e) => {
+      if (!card.contains(e.relatedTarget)) {
+        card.classList.remove("drag-target");
+      }
+    });
+    card.addEventListener("drop", (e) => {
+      e.preventDefault();
+      clearDragTarget();
+      const dropIndex = Number(card.dataset.index);
+      if (!Number.isFinite(dragIndex) || dragIndex === dropIndex) return;
+      const [moved] = pdfVisualPages.splice(dragIndex, 1);
+      pdfVisualPages.splice(dropIndex, 0, moved);
+      renderPdfVisualGrid();
+    });
+  });
+}
+
+async function loadPdfVisualEditor() {
+  if (pdfEditFiles.length !== 1) {
+    setStatus("pdfEditStatus", "Editor requires exactly one PDF file.", "error");
+    return;
+  }
+  if (!window.pdfjsLib) {
+    setStatus("pdfEditStatus", "PDF preview library failed to load.", "error");
+    return;
+  }
+
+  const file = pdfEditFiles[0];
+  const fileKey = getPdfEditFileKey(file);
+  if (pdfVisualLoadedKey === fileKey && pdfVisualPages.length) {
+    setStatus("pdfEditStatus", "Page editor is ready.", "ok");
+    return;
+  }
+
+  pdfVisualLoadBtn.disabled = true;
+  pdfVisualLoadBtn.textContent = "Loading pages...";
+  setStatus("pdfEditStatus", "Loading page thumbnails...", "");
+
+  try {
+    const bytes = await file.arrayBuffer();
+    const doc = await window.pdfjsLib.getDocument({ data: bytes }).promise;
+    const pages = [];
+
+    for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber += 1) {
+      const page = await doc.getPage(pageNumber);
+      const viewport = page.getViewport({ scale: 0.3 });
+      const canvas = document.createElement("canvas");
+      const context = canvas.getContext("2d", { alpha: false });
+      canvas.width = Math.max(1, Math.floor(viewport.width));
+      canvas.height = Math.max(1, Math.floor(viewport.height));
+      await page.render({ canvasContext: context, viewport }).promise;
+
+      pages.push({
+        page: pageNumber,
+        include: true,
+        rotation: 0,
+        thumb: canvas.toDataURL("image/jpeg", 0.82),
+      });
+    }
+
+    pdfVisualPages = pages;
+    pdfVisualLoadedKey = fileKey;
+    renderPdfVisualGrid();
+    setStatus("pdfEditStatus", `Loaded ${pages.length} page thumbnail(s).`, "ok");
+  } catch (e) {
+    setStatus("pdfEditStatus", "Could not load PDF preview: " + e.message, "error");
+  } finally {
+    pdfVisualLoadBtn.disabled = false;
+    pdfVisualLoadBtn.textContent = "Load Page Thumbnails";
+  }
+}
+
+pdfVisualGrid.addEventListener("click", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+
+  const index = Number(target.dataset.index);
+  if (!Number.isFinite(index) || !pdfVisualPages[index]) return;
+
+  const action = target.dataset.action;
+  if (action === "toggle-select") {
+    pdfVisualPages[index].include = !pdfVisualPages[index].include;
+    renderPdfVisualGrid();
+  }
+  if (action === "rotate-left") {
+    pdfVisualPages[index].rotation = normalizeRotation(pdfVisualPages[index].rotation - 90);
+    renderPdfVisualGrid();
+  }
+  if (action === "rotate-right") {
+    pdfVisualPages[index].rotation = normalizeRotation(pdfVisualPages[index].rotation + 90);
+    renderPdfVisualGrid();
+  }
+});
+
+function addPdfEditFiles(fileList) {
+  for (const file of fileList) {
+    if (isPdfFile(file)) {
+      pdfEditFiles.push(file);
+    }
+  }
+  renderPdfEditFiles();
+  if (pdfEditFiles.length !== 1 || getPdfEditFileKey(pdfEditFiles[0]) !== pdfVisualLoadedKey) {
+    pdfVisualPages = [];
+    pdfVisualLoadedKey = "";
+    renderPdfVisualGrid();
+  }
+}
+
+function removePdfEditFile(index) {
+  pdfEditFiles.splice(index, 1);
+  renderPdfEditFiles();
+  if (pdfEditFiles.length !== 1 || getPdfEditFileKey(pdfEditFiles[0]) !== pdfVisualLoadedKey) {
+    pdfVisualPages = [];
+    pdfVisualLoadedKey = "";
+    renderPdfVisualGrid();
+  }
+}
+
+function updatePdfEditUI() {
+  pdfEditOperationHelp.textContent = "Load one PDF and drag cards to reorder pages. Use tick and rotate controls on each page card.";
+  pdfEditDropText.textContent = "Click or drag a PDF here";
+  pdfEditBtn.textContent = "Apply Page Edit";
+  document.getElementById("pdfEditDownload").textContent = "Download Edited PDF";
+  pdfVisualField.classList.remove("hidden");
+}
+
+pdfEditDropZone.addEventListener("click", () => pdfEditInput.click());
+pdfEditInput.addEventListener("change", () => addPdfEditFiles(pdfEditInput.files));
+pdfEditDropZone.addEventListener("dragover", e => { e.preventDefault(); pdfEditDropZone.classList.add("dragover"); });
+pdfEditDropZone.addEventListener("dragleave", () => pdfEditDropZone.classList.remove("dragover"));
+pdfEditDropZone.addEventListener("drop", e => {
+  e.preventDefault();
+  pdfEditDropZone.classList.remove("dragover");
+  addPdfEditFiles(e.dataTransfer.files);
+});
+pdfVisualLoadBtn.addEventListener("click", loadPdfVisualEditor);
+updatePdfEditUI();
 
 compressDropZone.addEventListener("click", () => compressInput.click());
 compressInput.addEventListener("change", () => {
@@ -1740,6 +2506,61 @@ async function compressImageFile() {
   }
 }
 
+async function modifyPdf() {
+  const operation = "visual_edit";
+  const btn = pdfEditBtn;
+
+  if (pdfEditFiles.length !== 1) {
+    setStatus("pdfEditStatus", "This operation requires exactly one PDF file.", "error");
+    return;
+  }
+
+  await loadPdfVisualEditor();
+  if (!pdfVisualPages.length) {
+    return;
+  }
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Processing...';
+  setStatus("pdfEditStatus", "Uploading and modifying PDF...", "");
+
+  const form = new FormData();
+  form.append("operation", operation);
+  form.append("pdf", pdfEditFiles[0]);
+
+  const selectedSlots = pdfVisualPages
+    .filter(page => page.include)
+    .map(page => ({ page: page.page, rotation: normalizeRotation(page.rotation) }));
+  if (!selectedSlots.length) {
+    btn.disabled = false;
+    btn.textContent = "Apply Page Edit";
+    setStatus("pdfEditStatus", "Select at least one page to keep in the output.", "error");
+    return;
+  }
+  form.append("slots_json", JSON.stringify(selectedSlots));
+
+  try {
+    const res = await fetch("/modify-pdf", { method: "POST", body: form });
+    const data = await res.json();
+    if (!res.ok) {
+      setStatus("pdfEditStatus", data.error || "PDF edit failed.", "error");
+      return;
+    }
+
+    setStatus("pdfEditStatus", data.summary || "PDF updated successfully.", "ok");
+
+    const dl = document.getElementById("pdfEditDownload");
+    dl.dataset.url = data.file;
+    dl.dataset.name = data.filename || "edited.pdf";
+    dl.style.display = "block";
+  } catch (e) {
+    setStatus("pdfEditStatus", "Network error: " + e.message, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Apply Page Edit";
+  }
+}
+
 function setStatus(id, msg, cls) {
   const el = document.getElementById(id);
   el.textContent = msg; el.className = "status " + cls;
@@ -1808,6 +2629,11 @@ document.getElementById("compressDownload").addEventListener("click", (e) => {
   downloadFromEndpoint("compressDownload", "compressStatus");
 });
 
+document.getElementById("pdfEditDownload").addEventListener("click", (e) => {
+  e.preventDefault();
+  downloadFromEndpoint("pdfEditDownload", "pdfEditStatus");
+});
+
 document.getElementById("imgCompressDownload").addEventListener("click", (e) => {
   e.preventDefault();
   downloadFromEndpoint("imgCompressDownload", "imgCompressStatus");
@@ -1831,4 +2657,4 @@ document.addEventListener("keydown", e => { if (e.key === "Escape") closeLightbo
 if __name__ == "__main__":
     print("Starting PDF to Image Converter...")
     print("Open http://127.0.0.1:5001 in your browser")
-    app.run(host="127.0.0.1", port=5001, debug=False)
+    app.run(host="127.0.0.1", port=5001, debug=False, use_reloader=True)
