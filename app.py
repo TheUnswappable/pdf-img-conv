@@ -185,59 +185,6 @@ def parse_page_range(page_range_str: str, total_pages: int) -> list:
     return sorted(indices)
 
 
-def parse_page_order(page_order_str: str, total_pages: int) -> list:
-    s = page_order_str.strip().lower()
-    if s == "" or s == "all":
-        return list(range(total_pages))
-
-    ordered_pages = []
-    for part in s.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if "-" in part:
-            m = re.fullmatch(r"(\d+)\s*-\s*(\d+)", part)
-            if not m:
-                raise ValueError(f"Invalid range: '{part}'")
-            start, end = int(m.group(1)), int(m.group(2))
-            if start < 1 or start > total_pages or end < 1 or end > total_pages:
-                raise ValueError(
-                    f"Range '{part}' out of bounds (doc has {total_pages} pages)"
-                )
-            step = 1 if end >= start else -1
-            ordered_pages.extend(range(start - 1, end - 1 + step, step))
-        else:
-            if not part.isdigit():
-                raise ValueError(f"Invalid page: '{part}'")
-            page_number = int(part)
-            if page_number < 1 or page_number > total_pages:
-                raise ValueError(
-                    f"Page {page_number} out of bounds (doc has {total_pages} pages)"
-                )
-            ordered_pages.append(page_number - 1)
-
-    if not ordered_pages:
-        raise ValueError("No pages selected.")
-    return ordered_pages
-
-
-def parse_page_groups(groups_str: str, total_pages: int) -> list:
-    s = groups_str.strip().lower()
-    if s == "" or s == "all":
-        return [[page_index] for page_index in range(total_pages)]
-
-    groups = []
-    for chunk in groups_str.split(";"):
-        chunk = chunk.strip()
-        if not chunk:
-            continue
-        groups.append(parse_page_order(chunk, total_pages))
-
-    if not groups:
-        raise ValueError("No split groups were provided.")
-    return groups
-
-
 def cleanup_old_sessions():
     while True:
         time.sleep(60)
@@ -836,16 +783,7 @@ def compress_image():
 @app.route("/modify-pdf", methods=["POST"])
 def modify_pdf():
     operation = request.form.get("operation", "").strip().lower()
-    allowed_operations = {
-        "merge",
-        "split",
-        "rotate",
-        "crop",
-        "delete",
-        "extract",
-        "organize",
-      "visual_edit",
-    }
+    allowed_operations = {"merge", "visual_edit"}
     if operation not in allowed_operations:
         return jsonify({"error": "Invalid PDF edit operation."}), 400
 
@@ -920,213 +858,51 @@ def modify_pdf():
             total_pages = len(source_doc)
             base_name = os.path.splitext(os.path.basename(pdf_file.filename))[0] or "document"
 
-            if operation == "split":
-                page_groups = parse_page_groups(
-                    request.form.get("page_groups", ""), total_pages
-                )
-                output_name = f"split-{base_name}.zip"
-                output_path = os.path.join(tmp_dir, output_name)
+            slots_raw = (request.form.get("slots_json", "") or "").strip()
+            if not slots_raw:
+              raise ValueError("No page edits were provided.")
 
-                with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as archive:
-                    for group_index, page_group in enumerate(page_groups, start=1):
-                        part_doc = fitz.open()
-                        try:
-                            for page_index in page_group:
-                                part_doc.insert_pdf(
-                                    source_doc,
-                                    from_page=page_index,
-                                    to_page=page_index,
-                                )
-                            part_name = f"{base_name}-part-{group_index:02d}.pdf"
-                            part_path = os.path.join(tmp_dir, part_name)
-                            part_doc.save(part_path)
-                            archive.write(part_path, arcname=part_name)
-                        finally:
-                            part_doc.close()
+            try:
+                slots = json.loads(slots_raw)
+            except json.JSONDecodeError as e:
+              raise ValueError(f"Invalid edit payload: {e}")
 
-                output_count = len(page_groups)
-                page_count = sum(len(group) for group in page_groups)
-                summary = f"Split the PDF into {output_count} file(s)."
+            if not isinstance(slots, list) or not slots:
+              raise ValueError("Edit must include at least one page slot.")
 
-            elif operation == "rotate":
-                page_indices = parse_page_range(
-                    request.form.get("pages", "all"), total_pages
-                )
-                rotation = int(request.form.get("rotation", 90))
-                if rotation not in (90, 180, 270):
-                    source_doc.close()
-                    return jsonify(
-                        {"error": "Rotation must be 90, 180, or 270 degrees."}
-                    ), 400
+            edited_doc = fitz.open()
+            try:
+                for slot in slots:
+                    if not isinstance(slot, dict):
+                      raise ValueError("Each slot must be an object.")
 
-                for page_index in page_indices:
-                    page = source_doc[page_index]
-                    page.set_rotation((page.rotation + rotation) % 360)
-
-                output_name = f"rotated-{base_name}.pdf"
-                output_path = os.path.join(tmp_dir, output_name)
-                source_doc.save(output_path)
-                page_count = total_pages
-                summary = f"Rotated {len(page_indices)} page(s) by {rotation} degrees."
-
-            elif operation == "crop":
-                page_indices = parse_page_range(
-                    request.form.get("pages", "all"), total_pages
-                )
-                crop_top = float(request.form.get("crop_top", 0) or 0)
-                crop_right = float(request.form.get("crop_right", 0) or 0)
-                crop_bottom = float(request.form.get("crop_bottom", 0) or 0)
-                crop_left = float(request.form.get("crop_left", 0) or 0)
-
-                for value in (crop_top, crop_right, crop_bottom, crop_left):
-                    if value < 0 or value > 45:
-                        source_doc.close()
-                        return jsonify(
-                            {"error": "Crop values must be between 0 and 45 percent."}
-                        ), 400
-
-                if crop_top + crop_bottom >= 90 or crop_left + crop_right >= 90:
-                    source_doc.close()
-                    return jsonify(
-                        {"error": "Crop values are too large for the page size."}
-                    ), 400
-
-                for page_index in page_indices:
-                    page = source_doc[page_index]
-                    rect = page.rect
-                    x0 = rect.x0 + (rect.width * (crop_left / 100.0))
-                    y0 = rect.y0 + (rect.height * (crop_top / 100.0))
-                    x1 = rect.x1 - (rect.width * (crop_right / 100.0))
-                    y1 = rect.y1 - (rect.height * (crop_bottom / 100.0))
-                    cropped_rect = fitz.Rect(x0, y0, x1, y1)
-                    if cropped_rect.width < 36 or cropped_rect.height < 36:
-                        source_doc.close()
-                        return jsonify(
-                            {"error": "Crop values leave too little visible page area."}
-                        ), 400
-                    page.set_cropbox(cropped_rect)
-
-                output_name = f"cropped-{base_name}.pdf"
-                output_path = os.path.join(tmp_dir, output_name)
-                source_doc.save(output_path)
-                page_count = total_pages
-                summary = f"Cropped {len(page_indices)} page(s)."
-
-            elif operation == "delete":
-                page_indices = parse_page_range(
-                    request.form.get("pages", "all"), total_pages
-                )
-                if len(page_indices) >= total_pages:
-                    source_doc.close()
-                    return jsonify(
-                        {"error": "You cannot delete every page from the PDF."}
-                    ), 400
-
-                for page_index in sorted(page_indices, reverse=True):
-                    source_doc.delete_page(page_index)
-
-                output_name = f"deleted-pages-{base_name}.pdf"
-                output_path = os.path.join(tmp_dir, output_name)
-                source_doc.save(output_path)
-                page_count = len(source_doc)
-                summary = f"Deleted {len(page_indices)} page(s)."
-
-            elif operation == "extract":
-                page_indices = parse_page_range(
-                    request.form.get("pages", "all"), total_pages
-                )
-                extracted_doc = fitz.open()
-                try:
-                    for page_index in page_indices:
-                        extracted_doc.insert_pdf(
-                            source_doc,
-                            from_page=page_index,
-                            to_page=page_index,
+                    page_number = int(slot.get("page", 0))
+                    rotation = int(slot.get("rotation", 0))
+                    if page_number < 1 or page_number > total_pages:
+                        raise ValueError(
+                            f"Page {page_number} out of bounds (doc has {total_pages} pages)"
                         )
+                    if rotation not in (0, 90, 180, 270):
+                      raise ValueError(
+                        "Rotation must be one of 0, 90, 180, or 270."
+                      )
 
-                    output_name = f"extracted-{base_name}.pdf"
-                    output_path = os.path.join(tmp_dir, output_name)
-                    extracted_doc.save(output_path)
-                finally:
-                    extracted_doc.close()
+                    edited_doc.insert_pdf(
+                        source_doc,
+                        from_page=page_number - 1,
+                        to_page=page_number - 1,
+                    )
+                    edited_doc[-1].set_rotation(rotation)
 
-                page_count = len(page_indices)
-                summary = f"Extracted {len(page_indices)} page(s) into a new PDF."
+                output_name = f"edited-{base_name}.pdf"
+                output_path = os.path.join(tmp_dir, output_name)
+                edited_doc.save(output_path)
+            finally:
+                edited_doc.close()
 
-            elif operation == "organize":
-                page_order = parse_page_order(
-                    request.form.get("page_order", "all"), total_pages
-                )
-                organized_doc = fitz.open()
-                try:
-                    for page_index in page_order:
-                        organized_doc.insert_pdf(
-                            source_doc,
-                            from_page=page_index,
-                            to_page=page_index,
-                        )
-
-                    output_name = f"organized-{base_name}.pdf"
-                    output_path = os.path.join(tmp_dir, output_name)
-                    organized_doc.save(output_path)
-                finally:
-                    organized_doc.close()
-
-                page_count = len(page_order)
-                summary = (
-                    f"Organized the PDF into {len(page_order)} ordered page slot(s)."
-                )
-
-            elif operation == "visual_edit":
-                slots_raw = (request.form.get("slots_json", "") or "").strip()
-                if not slots_raw:
-                  raise ValueError("No page edits were provided.")
-
-                try:
-                    slots = json.loads(slots_raw)
-                except json.JSONDecodeError as e:
-                  raise ValueError(f"Invalid edit payload: {e}")
-
-                if not isinstance(slots, list) or not slots:
-                  raise ValueError("Edit must include at least one page slot.")
-
-                edited_doc = fitz.open()
-                try:
-                    for slot in slots:
-                        if not isinstance(slot, dict):
-                          raise ValueError("Each slot must be an object.")
-
-                        page_number = int(slot.get("page", 0))
-                        rotation = int(slot.get("rotation", 0))
-                        if page_number < 1 or page_number > total_pages:
-                            raise ValueError(
-                                f"Page {page_number} out of bounds (doc has {total_pages} pages)"
-                            )
-                        if rotation not in (0, 90, 180, 270):
-                          raise ValueError(
-                            "Rotation must be one of 0, 90, 180, or 270."
-                          )
-
-                        edited_doc.insert_pdf(
-                            source_doc,
-                            from_page=page_number - 1,
-                            to_page=page_number - 1,
-                        )
-                        edited_doc[-1].set_rotation(rotation)
-
-                    output_name = f"edited-{base_name}.pdf"
-                    output_path = os.path.join(tmp_dir, output_name)
-                    edited_doc.save(output_path)
-                finally:
-                    edited_doc.close()
-
-                page_count = len(slots)
-                summary = f"Applied page edits to {len(slots)} slot(s)."
-
-            else:
-                source_doc.close()
-                return jsonify({"error": "Unsupported PDF operation."}), 400
-
+            page_count = len(slots)
+            summary = f"Applied page edits to {len(slots)} slot(s)."
+ 
             source_doc.close()
 
         SESSIONS[session_id] = {
@@ -2285,7 +2061,6 @@ themeToggle.addEventListener("click", () => {
 const dropZone = document.getElementById("dropZone");
 const pdfInput = document.getElementById("pdfInput");
 const fileName = document.getElementById("fileName");
-const pagesInput = document.getElementById("pages");
 
 dropZone.addEventListener("click", () => pdfInput.click());
 pdfInput.addEventListener("change", () => {
